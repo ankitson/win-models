@@ -11,6 +11,9 @@ default:
 status:
     @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/status.ps1 -LlamaPort {{llama_port}} -LiteRtPort {{litert_port}}
 
+monitor interval="2":
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/monitor-vram.ps1 -IntervalSeconds {{interval}}
+
 stop:
     @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/stop.ps1
 
