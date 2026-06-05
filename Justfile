@@ -29,11 +29,17 @@ download-unsloth26:
 serve-google-qat12:
     @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/serve-llama.ps1 -Variant google-qat12 -ModelRoot "{{model_root}}" -BindHost "{{host}}" -Port {{llama_port}} -Reasoning on
 
+serve-google-qat12-lowvram:
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/serve-llama.ps1 -Variant google-qat12 -ModelRoot "{{model_root}}" -BindHost "{{host}}" -Port {{llama_port}} -Reasoning on -GpuLayers 24 -CacheRam 0
+
 serve-ggml12:
     @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/serve-llama.ps1 -Variant ggml-12b-q4km -ModelRoot "{{model_root}}" -BindHost "{{host}}" -Port {{llama_port}} -Reasoning on
 
 serve-unsloth26:
     @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/serve-llama.ps1 -Variant unsloth-26b-q3km -ModelRoot "{{model_root}}" -BindHost "{{host}}" -Port {{llama_port}} -Reasoning on
+
+serve-unsloth26-lowvram:
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/serve-llama.ps1 -Variant unsloth-26b-q3km -ModelRoot "{{model_root}}" -BindHost "{{host}}" -Port {{llama_port}} -Reasoning on -GpuLayers 20 -CacheRam 0
 
 serve-litert-e4b:
     @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/serve-litert.ps1 -Variant litert-e4b -ModelRoot "{{model_root}}" -BindHost "{{host}}" -Port {{litert_port}}

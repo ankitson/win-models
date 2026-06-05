@@ -4,7 +4,9 @@ param(
   [string] $BindHost = "0.0.0.0",
   [int] $Port = 8080,
   [ValidateSet("on", "off", "auto")] [string] $Reasoning = "on",
-  [int] $ContextSize = 8192
+  [int] $ContextSize = 8192,
+  [string] $GpuLayers = "all",
+  [int] $CacheRam = 8192
 )
 
 . "$PSScriptRoot\common.ps1"
@@ -54,11 +56,12 @@ $args = @(
   "--alias", $alias,
   "--ctx-size", "$ContextSize",
   "--parallel", "1",
-  "--n-gpu-layers", "all",
+  "--n-gpu-layers", "$GpuLayers",
   "--flash-attn", "on",
   "--cache-type-k", "q8_0",
   "--cache-type-v", "q8_0",
   "--media-path", $media,
+  "--cache-ram", "$CacheRam",
   "--jinja",
   "--reasoning", $Reasoning,
   "--reasoning-format", "deepseek",
