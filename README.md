@@ -12,6 +12,8 @@ just serve-google-qat12
 just bench gemma-4-12b-qat
 ```
 
+See [BENCHMARKS.md](BENCHMARKS.md) for the local benchmark notes and current recommendation.
+
 ## Useful Endpoints
 
 - llama.cpp server: `http://localhost:8080/v1`
@@ -30,4 +32,3 @@ For LAN clients, replace `localhost` with this machine's LAN IP.
 
 Reasoning is enabled for llama.cpp recipes. Use a larger `max_tokens` budget for clients,
 because reasoning tokens count against the output budget.
-
