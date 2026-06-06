@@ -12,8 +12,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$taskName = "Local Gemma Server"
-$shortcutName = "Local Gemma Server.lnk"
+$taskName = "Win Models Server"
+$shortcutName = "Win Models Server.lnk"
 $startupDir = [Environment]::GetFolderPath("Startup")
 $shortcutPath = Join-Path $startupDir $shortcutName
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -62,7 +62,7 @@ try {
   $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$serveScript`" -Variant $Variant -ModelRoot `"$ModelRoot`" -BindHost $BindHost -Port $Port -Reasoning $Reasoning -ContextSize $ContextSize -GpuLayers $GpuLayers -CacheRam $CacheRam"
   $shortcut.WorkingDirectory = $repoRoot
   $shortcut.WindowStyle = 7
-  $shortcut.Description = "Start local Gemma llama.cpp server"
+  $shortcut.Description = "Start local model llama.cpp server"
   $shortcut.Save()
   Write-Host "Installed Startup folder shortcut: $shortcutPath"
 }

@@ -1,5 +1,5 @@
-$taskName = "Local Gemma Server"
-$shortcutPath = Join-Path ([Environment]::GetFolderPath("Startup")) "Local Gemma Server.lnk"
+$taskName = "Win Models Server"
+$shortcutPath = Join-Path ([Environment]::GetFolderPath("Startup")) "Win Models Server.lnk"
 $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($task) {
   $info = Get-ScheduledTaskInfo -TaskName $taskName
