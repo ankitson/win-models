@@ -1,0 +1,46 @@
+set shell := ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+
+model_root := env_var_or_default("WIN_MODELS_MODEL_ROOT", "E:\\root\\projects\\models")
+host := env_var_or_default("WIN_MODELS_HOST", "0.0.0.0")
+llama_port := env_var_or_default("WIN_MODELS_LLAMA_PORT", "8080")
+litert_port := env_var_or_default("WIN_MODELS_LITERT_PORT", "9379")
+root := module_directory() / "../.."
+
+default:
+    @just --justfile "{{ module_directory() }}/Justfile" --working-directory "{{ module_directory() }}" --list
+
+download variant:
+    @uv --project "{{ root }}" run win-models plain download "{{ variant }}" --model-root "{{ model_root }}"
+
+download-ggml12:
+    @uv --project "{{ root }}" run win-models plain download "ggml-12b-q4km" --model-root "{{ model_root }}"
+
+download-litert-e4b:
+    @uv --project "{{ root }}" run win-models plain download "litert-e4b" --model-root "{{ model_root }}"
+
+download-unsloth26:
+    @uv --project "{{ root }}" run win-models plain download "unsloth-26b-q3km" --model-root "{{ model_root }}"
+
+serve-google-qat12:
+    @uv --project "{{ root }}" run win-models plain serve google-qat12 --model-root "{{ model_root }}" --host "{{ host }}" --port {{ llama_port }} --reasoning on
+
+serve-google-qat12-lowvram:
+    @uv --project "{{ root }}" run win-models plain serve google-qat12 --model-root "{{ model_root }}" --host "{{ host }}" --port {{ llama_port }} --reasoning on --gpu-layers 24 --cache-ram 0
+
+serve-ggml12:
+    @uv --project "{{ root }}" run win-models plain serve ggml-12b-q4km --model-root "{{ model_root }}" --host "{{ host }}" --port {{ llama_port }} --reasoning on
+
+serve-unsloth26:
+    @uv --project "{{ root }}" run win-models plain serve unsloth-26b-q3km --model-root "{{ model_root }}" --host "{{ host }}" --port {{ llama_port }} --reasoning on
+
+serve-unsloth26-lowvram:
+    @uv --project "{{ root }}" run win-models plain serve unsloth-26b-q3km --model-root "{{ model_root }}" --host "{{ host }}" --port {{ llama_port }} --reasoning on --gpu-layers 20 --cache-ram 0
+
+serve-litert-e4b:
+    @uv --project "{{ root }}" run win-models plain serve-litert litert-e4b --model-root "{{ model_root }}" --host "{{ host }}" --port {{ litert_port }}
+
+bench model url="http://127.0.0.1:8080/v1" runs="2" max_tokens="512":
+    @uv --project "{{ root }}" run win-models plain bench "{{ model }}" --base-url "{{ url }}" --runs {{ runs }} --max-tokens {{ max_tokens }}
+
+bench-litert model="gemma-4-E4B-it,gpu" runs="2" max_tokens="512":
+    @uv --project "{{ root }}" run win-models plain bench "{{ model }}" --base-url "http://127.0.0.1:9379/v1" --runs {{ runs }} --max-tokens {{ max_tokens }}

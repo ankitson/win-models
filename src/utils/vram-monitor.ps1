@@ -6,9 +6,7 @@ param(
 function Get-ProcessNameForId {
   param([int] $ProcessId)
   $p = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-  if ($p) {
-    return $p.ProcessName
-  }
+  if ($p) { return $p.ProcessName }
   return "<protected>"
 }
 
@@ -51,3 +49,4 @@ while ($true) {
 
   Start-Sleep -Seconds $IntervalSeconds
 }
+
