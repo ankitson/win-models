@@ -1,6 +1,6 @@
 param(
   [int] $Port = 8080,
-  [string] $DisplayName = "Local Gemma llama.cpp 8080"
+  [string] $DisplayName = "Win Models llama.cpp 8080"
 )
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -29,7 +29,6 @@ New-NetFirewallRule `
   -Protocol TCP `
   -LocalPort $Port `
   -Profile Private `
-  -Description "Allow LAN access to local Gemma llama.cpp OpenAI-compatible server." | Out-Null
+  -Description "Allow LAN access to local llama.cpp OpenAI-compatible model server." | Out-Null
 
 Write-Host "Created firewall rule: $DisplayName TCP $Port"
-

@@ -1,6 +1,6 @@
-# Local Gemma Lab
+# Win Models
 
-Small Windows/PowerShell setup for trying Gemma 4 model variants on this machine.
+Small Windows/PowerShell setup for trying local model variants on this machine.
 
 Large files live outside the repo under `E:\root\models`.
 
@@ -21,11 +21,11 @@ See [BENCHMARKS.md](BENCHMARKS.md) for the local benchmark notes and current rec
 
 For LAN clients, replace `localhost` with this machine's LAN IP.
 
-Current common LAN URLs on this machine:
+Find the current LAN addresses with:
 
-- Wi-Fi: `http://172.16.0.200:8080/v1`
-- Ethernet: `http://172.16.0.209:8080/v1`
-- Tailscale: `http://100.108.12.112:8080/v1`
+```powershell
+just status
+```
 
 ## Startup
 
@@ -47,7 +47,7 @@ just startup-uninstall
 To allow other LAN machines through Windows Firewall, run this from an elevated PowerShell window:
 
 ```powershell
-cd C:\Users\ankit\Documents\docs-root\projects\code\local-gemma-lab
+cd C:\Users\ankit\Documents\docs-root\projects\code\win-models
 just firewall-allow 8080
 ```
 
