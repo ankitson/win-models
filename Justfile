@@ -1,9 +1,11 @@
 set shell := ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
 
-model_root := "E:\\root\\models"
+model_root := "E:\\root\\projects\\models"
+studio_home := "E:\\root\\projects\\unsloth"
 host := "0.0.0.0"
 llama_port := "8080"
 litert_port := "9379"
+studio_port := "8888"
 
 default:
     just --list
@@ -64,6 +66,27 @@ serve-litert-e4b:
 
 bench model url="http://127.0.0.1:8080/v1" runs="2" max_tokens="512":
     @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/bench-openai.ps1 -BaseUrl "{{url}}" -Model "{{model}}" -Runs {{runs}} -MaxTokens {{max_tokens}}
+
+# --- Unsloth Studio (web UI) -------------------------------------------------
+# Reproducible install of the Studio server (patches the llama.cpp prebuilt
+# installer to use local zips, installs pinned cuda-13.3 build, registers the
+# model folder, installs the launcher). See UNSLOTH.md.
+# zips default to ~\Downloads; override with: just studio-setup "D:\some\dir"
+studio-setup zip_dir="":
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/unsloth-setup.ps1 -StudioHome "{{studio_home}}" -ModelRoot "{{model_root}}" {{ if zip_dir == "" { "" } else { "-ZipDir " + quote(zip_dir) } }}
+
+studio-serve port=studio_port:
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/unsloth-serve.ps1 -StudioHome "{{studio_home}}" -Port {{port}} -Open
+
+studio-serve-lan port=studio_port:
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/unsloth-serve.ps1 -StudioHome "{{studio_home}}" -Port {{port}} -Lan
+
+# Stop the background server cleanly (Ctrl+C on studio-serve can't reach a detached server).
+studio-stop port=studio_port:
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/unsloth-stop.ps1 -StudioHome "{{studio_home}}" -Port {{port}}
+
+studio-register-models path=model_root:
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/unsloth-register-folder.ps1 -StudioHome "{{studio_home}}" -Path "{{path}}"
 
 bench-litert model="gemma-4-E4B-it,gpu" runs="2" max_tokens="512":
     @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/bench-openai.ps1 -BaseUrl "http://127.0.0.1:9379/v1" -Model "{{model}}" -Runs {{runs}} -MaxTokens {{max_tokens}}
