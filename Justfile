@@ -17,6 +17,21 @@ monitor interval="2":
 stop:
     @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/stop.ps1
 
+startup-install variant="google-qat12" port="8080":
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-startup-task.ps1 -Variant "{{variant}}" -ModelRoot "{{model_root}}" -BindHost "{{host}}" -Port {{port}}
+
+startup-install-lowvram port="8080":
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-startup-task.ps1 -Variant "google-qat12" -ModelRoot "{{model_root}}" -BindHost "{{host}}" -Port {{port}} -GpuLayers 24 -CacheRam 0
+
+startup-uninstall:
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/uninstall-startup-task.ps1
+
+startup-status:
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/startup-status.ps1
+
+firewall-allow port="8080":
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/allow-firewall.ps1 -Port {{port}}
+
 download variant:
     @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/download.ps1 -Variant "{{variant}}" -ModelRoot "{{model_root}}"
 
