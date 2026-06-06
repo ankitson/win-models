@@ -81,7 +81,11 @@ studio-serve port=studio_port:
 studio-serve-lan port=studio_port:
     @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/unsloth-serve.ps1 -StudioHome "{{studio_home}}" -Port {{port}} -Lan
 
-# Stop the background server cleanly (Ctrl+C on studio-serve can't reach a detached server).
+# Verbose backend logging (LOG_LEVEL=DEBUG) streams in the foreground.
+studio-serve-debug port=studio_port:
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/unsloth-serve.ps1 -StudioHome "{{studio_home}}" -Port {{port}} -LogLevel DEBUG -Open -Lan
+
+# Clean up a stale or separately-launched Studio process on the port.
 studio-stop port=studio_port:
     @powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/unsloth-stop.ps1 -StudioHome "{{studio_home}}" -Port {{port}}
 

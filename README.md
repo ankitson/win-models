@@ -1,64 +1,30 @@
 # Win Models
 
-Small Windows/PowerShell setup for trying local model variants on this machine.
+Small Windows/PowerShell setup for trying local model variants on this machine. With a few different execution engines
 
-Large files live outside the repo under `E:\root\models`.
 
 ## Quick Start
 
+Uses the **Unsloth Studio** API Server + Web UI (chat front-end over the same models):
+
 ```powershell
+just studio-setup          # reproducible install (one-time / after a Studio update)
+just studio-serve-debug    # foreground server on 0.0.0.0:8888, tools enabled, defaults to gemma4-12b
+
+# can also serve via plain llama.cpp
 just status
-just serve-google-qat12
+just serve-google-qat12    # via llama
 just bench gemma-4-12b-qat
 ```
 
-See [BENCHMARKS.md](BENCHMARKS.md) for the local benchmark notes and current recommendation.
-
-For the **Unsloth Studio web UI** (chat front-end over the same models):
-
-```powershell
-just studio-setup     # reproducible install (one-time / after a Studio update)
-just studio-serve     # background server on http://localhost:8888, logs in logs/
-```
-
 See [UNSLOTH.md](UNSLOTH.md) for details, the local-zip workaround, and gotchas.
+See [BENCHMARKS.md](BENCHMARKS.md) for the local benchmark notes and current recommendation.
 
 ## Useful Endpoints
 
 - llama.cpp server: `http://localhost:8080/v1`
 - LiteRT-LM server: `http://localhost:9379/v1`
-
-For LAN clients, replace `localhost` with this machine's LAN IP.
-
-Find the current LAN addresses with:
-
-```powershell
-just status
-```
-
-## Startup
-
-Install startup launch for the default Google QAT 12B server:
-
-```powershell
-just startup-install
-```
-
-This first tries a Windows Scheduled Task. If Windows denies that, it falls back to a user Startup-folder shortcut.
-
-Check or remove startup:
-
-```powershell
-just startup-status
-just startup-uninstall
-```
-
-To allow other LAN machines through Windows Firewall, run this from an elevated PowerShell window:
-
-```powershell
-cd C:\Users\ankit\Documents\docs-root\projects\code\win-models
-just firewall-allow 8080
-```
+- unsloth server: `http://localhost:8888/v1`
 
 ## Variants
 
