@@ -21,6 +21,36 @@ See [BENCHMARKS.md](BENCHMARKS.md) for the local benchmark notes and current rec
 
 For LAN clients, replace `localhost` with this machine's LAN IP.
 
+Current common LAN URLs on this machine:
+
+- Wi-Fi: `http://172.16.0.200:8080/v1`
+- Ethernet: `http://172.16.0.209:8080/v1`
+- Tailscale: `http://<tailscale-ip>:8080/v1`
+
+## Startup
+
+Install startup launch for the default Google QAT 12B server:
+
+```powershell
+just startup-install
+```
+
+This first tries a Windows Scheduled Task. If Windows denies that, it falls back to a user Startup-folder shortcut.
+
+Check or remove startup:
+
+```powershell
+just startup-status
+just startup-uninstall
+```
+
+To allow other LAN machines through Windows Firewall, run this from an elevated PowerShell window:
+
+```powershell
+cd C:\Users\ankit\Documents\docs-root\projects\code\local-gemma-lab
+just firewall-allow 8080
+```
+
 ## Variants
 
 - `google-qat12`: official Google Gemma 4 12B IT QAT Q4_0 GGUF with multimodal projector.
