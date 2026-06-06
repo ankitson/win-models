@@ -9,8 +9,7 @@ $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administ
 if (-not $isAdmin) {
   Write-Host "This script must run from an elevated PowerShell window to modify Windows Firewall."
   Write-Host "Run this as Administrator:"
-  Write-Host "  cd '$((Split-Path -Parent $PSScriptRoot))'"
-  Write-Host "  just firewall-allow $Port"
+  Write-Host "  just utils firewall-allow $Port"
   exit 1
 }
 
@@ -32,3 +31,4 @@ New-NetFirewallRule `
   -Description "Allow LAN access to local llama.cpp OpenAI-compatible model server." | Out-Null
 
 Write-Host "Created firewall rule: $DisplayName TCP $Port"
+
