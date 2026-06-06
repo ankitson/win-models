@@ -14,6 +14,15 @@ just bench gemma-4-12b-qat
 
 See [BENCHMARKS.md](BENCHMARKS.md) for the local benchmark notes and current recommendation.
 
+For the **Unsloth Studio web UI** (chat front-end over the same models):
+
+```powershell
+just studio-setup     # reproducible install (one-time / after a Studio update)
+just studio-serve     # background server on http://localhost:8888, logs in logs/
+```
+
+See [UNSLOTH.md](UNSLOTH.md) for details, the local-zip workaround, and gotchas.
+
 ## Useful Endpoints
 
 - llama.cpp server: `http://localhost:8080/v1`
