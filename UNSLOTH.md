@@ -10,7 +10,9 @@ bundled `llama.cpp`; these scripts make the otherwise-fiddly bits repeatable.
   (the venv lives at `…\unsloth_studio`). Override with `-StudioHome`.
 - Models (`model_root`): `E:\root\projects\models` — same folder the raw
   `serve-*` recipes use; registered with Studio so the web UI lists them.
-- Server logs: `logs/studio-<port>.out.log` / `.err.log` (gitignored).
+- Backend output streams in the terminal that launched Studio. Studio's internal
+  `llama-server` still writes per-model logs under
+  `E:\root\projects\unsloth\logs\llama-server`.
 
 ## Prerequisite
 
@@ -23,22 +25,19 @@ make-reproducible everything after it.
 
 ```powershell
 just studio-setup            # patch + install llama.cpp + finish setup + register models + wrapper
-just studio-serve            # background server on 127.0.0.1:8888, logs to logs/, opens browser
+just studio-serve            # foreground server on 127.0.0.1:8888, opens browser
 just studio-serve-lan        # same but bind 0.0.0.0 (LAN) — see secure-context note below
-just studio-stop             # stop the background server cleanly
+just studio-stop             # clean up a stale/separately-launched server on the port
 just studio-register-models  # (re)register E:\root\projects\models as a scan folder
 ```
 
 ### Stopping the server
 
-`studio-serve` runs the server **detached**, so Ctrl+C on the launcher can't reach
-it — use `just studio-stop`. (Studio's own `unsloth studio stop` is broken on
-Windows: it crashes in `os.kill(pid, 0)` with WinError 87 before terminating
-anything.) `studio-stop` finds the server by listening port + `studio.pid`, kills
-the whole process tree so the spawned child `llama-server` doesn't orphan, and
-clears the stale pid file. Windows can't deliver a graceful signal to a
-hidden-console process, so it's a force-stop — safe here, since Studio state lives
-in sqlite.
+`studio-serve` runs Studio in the foreground. Startup failures, backend logs, and
+Ctrl+C all happen in the same terminal. `studio-stop` is only a cleanup escape
+hatch for a stale process left from an older launch or a separate manual launch;
+it finds the server by listening port + `studio.pid`, kills the process tree so
+the spawned child `llama-server` doesn't orphan, and clears the stale pid file.
 
 `studio-setup` is idempotent — safe to re-run. Re-run it after ever reinstalling
 or updating Studio (the local-zip patch below lives inside the venv and is
@@ -93,6 +92,48 @@ listed. From `model_root` that surfaces:
 
 Not listed (by design): `litert-gemma-4-e4b-it` (`.litertlm` is LiteRT, not GGUF —
 llama.cpp can't run it) and `llama-b9536-cuda12` (a binary build, not a model).
+
+## Automatic inference settings
+
+On load, Studio auto-applies recommended sampling params (temperature, top_p,
+top_k, min_p) by **substring-matching a model-family token in the file path/name**
+— it does NOT read the model name from inside the GGUF. Our gemma-4 files all
+contain `gemma-4`, so they resolve to Gemma's recommended profile
+(temp 1.0 / top_p 0.95 / top_k 64 / min_p 0.0). Resolution order: model-specific
+YAML (HF-repo loads only) → family defaults (`inference_defaults.json`) → generic
+`default.yaml` (temp 0.7 / top_k -1 / min_p 0.01).
+
+Keep a recognized family token (`gemma-4`, `qwen3`, `llama-3.1`, ...) in the
+folder/file name. Rename it to something unrecognized and it silently falls back
+to the generic defaults. You can still override per-conversation in the UI.
+
+## Detailed logging
+
+Three layers, increasing detail:
+
+1. **Backend logs** (what Studio is doing — model loads, routing, template
+   application, tool calls). Controlled by `LOG_LEVEL` (default `INFO`). Run
+   `just studio-serve-debug` (sets `LOG_LEVEL=DEBUG`) and watch the terminal
+   output. The built-in request middleware logs method/path/status/timing only
+   (`request_completed`); it does **not** log request/response bodies.
+
+2. **llama-server logs** (the actual model traffic). Studio tees its internal
+   `llama-server`'s stdout/stderr to
+   `E:\root\projects\unsloth\logs\llama-server\llama-<ts>-port-<port>.log` (one
+   per model load). At default verbosity this has slot/timing/token traces. To
+   capture the **full templated prompt + sampling + generation**, load the model
+   with the llama extra arg `--verbose`. Studio appends llama extra args
+   last-wins; set them per model load in the UI's advanced load options, or use
+   the single-model server:
+   `unsloth studio run --model <path-or-repo> -H 127.0.0.1 -p 8888 --verbose`.
+   (There is no global env to force `--verbose` on the multi-model UI.)
+
+3. **Conversation content** (requests/responses as messages) is persisted in
+   `studio.db` (`chat_messages` table) regardless of log level — query it
+   directly for a durable record of prompts and replies.
+
+`LOG_LEVEL=DEBUG` is chatty; use it while debugging, not for a long-running
+server.
 
 ## Gotchas
 

@@ -1,11 +1,9 @@
-# Stop the background Unsloth Studio server cleanly.
+# Clean up a stale or separately-launched Unsloth Studio server.
 #
-# Why this exists: the server is launched detached, so Ctrl+C on `just studio-serve`
-# can't reach it. Studio's built-in `unsloth studio stop` is also broken on Windows
-# (it crashes in os.kill(pid, 0) with WinError 87 before terminating anything). So
-# we stop it ourselves: identify the server by listening port + studio.pid, kill the
-# whole process tree (so the spawned child llama-server doesn't orphan), preferring a
-# graceful request and only forcing if it won't exit, then clear the stale pid file.
+# Studio's built-in `unsloth studio stop` is broken on Windows (it crashes in
+# os.kill(pid, 0) with WinError 87 before terminating anything). So this script
+# identifies the server by listening port + studio.pid, kills the process tree so
+# the spawned child llama-server doesn't orphan, and clears the stale pid file.
 
 param(
   [string] $StudioHome = "E:\root\projects\unsloth",
