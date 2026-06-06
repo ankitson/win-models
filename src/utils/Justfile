@@ -1,0 +1,20 @@
+set shell := ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+
+llama_port := env_var_or_default("WIN_MODELS_LLAMA_PORT", "8080")
+litert_port := env_var_or_default("WIN_MODELS_LITERT_PORT", "9379")
+root := module_directory() / "../.."
+
+default:
+    @just --justfile "{{ module_directory() }}/Justfile" --working-directory "{{ module_directory() }}" --list
+
+status:
+    @uv --project "{{ root }}" run win-models utils status --llama-port {{ llama_port }} --litert-port {{ litert_port }}
+
+stop:
+    @uv --project "{{ root }}" run win-models utils stop
+
+monitor interval="2":
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{{ module_directory() }}/vram-monitor.ps1" -IntervalSeconds {{ interval }}
+
+firewall-allow port="8080":
+    @powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{{ module_directory() }}/firewall.ps1" -Port {{ port }}

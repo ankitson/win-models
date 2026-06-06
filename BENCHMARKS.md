@@ -6,7 +6,7 @@ These are quick local smoke benchmarks from this Windows machine:
 - Runtime for GGUF models: llama.cpp `b9536` CUDA build
 - llama.cpp settings: `ctx-size=8192`, `parallel=1`, `flash-attn=on`, `reasoning=on`
 - Benchmark prompt: one short reasoning-friendly sentence prompt
-- Benchmark command shape: `just bench <model>`, usually `Runs=2`, `MaxTokens=512`
+- Benchmark command shape: `just plain bench <model>`, usually `runs=2`, `max_tokens=512`
 
 These numbers are useful for rough local comparison, not a rigorous eval. With reasoning enabled, some models spent the full output budget on reasoning and produced no final `content`; those runs need a larger `max_tokens` or a reasoning budget before comparing answer quality.
 
@@ -45,18 +45,17 @@ These numbers are useful for rough local comparison, not a rigorous eval. With r
 Use `google-qat12` as the default local coding model:
 
 ```powershell
-just serve-google-qat12
+just plain serve-google-qat12
 ```
 
 For lower VRAM pressure:
 
 ```powershell
-just serve-google-qat12-lowvram
+just plain serve-google-qat12-lowvram
 ```
 
 For future benchmark passes, use larger output budgets with reasoning enabled:
 
 ```powershell
-just bench gemma-4-12b-qat http://127.0.0.1:8080/v1 2 2048
+just plain bench gemma-4-12b-qat http://127.0.0.1:8080/v1 2 2048
 ```
-
