@@ -38,6 +38,7 @@ ComfyUI:
 ```powershell
 just comfy setup
 just comfy serve
+just comfy serve-tailscale
 ```
 
 Download the new Gemma 26B variants into the Hugging Face cache layout used by

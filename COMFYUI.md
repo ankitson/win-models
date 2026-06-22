@@ -22,6 +22,7 @@ just comfy update         # git pull and refresh dependencies
 just comfy serve          # foreground server on 127.0.0.1:8188, opens browser
 just comfy serve-no-open  # foreground server without browser auto-open
 just comfy serve-lan      # bind 0.0.0.0 for LAN access
+just comfy serve-tailscale # bind localhost and the Tailscale IPv4
 just comfy status         # show checkout/venv/port state
 just comfy stop           # stop the process listening on COMFYUI_PORT
 ```
@@ -75,6 +76,8 @@ The CLI also accepts `--input-dir`, `--output-dir`, `--temp-dir`, and
 ## Notes
 
 - `just comfy serve` runs in the foreground. Use Ctrl+C for normal shutdown.
+- `just comfy serve-tailscale` resolves `tailscale ip -4` and passes
+  `--listen 127.0.0.1,<tailscale-ip>` to ComfyUI.
 - `just comfy stop` only kills the process that owns `COMFYUI_PORT`; it does not
   blindly kill every Python process.
 - Use `COMFYUI_TORCH=skip` when the venv already has the desired PyTorch build.

@@ -27,6 +27,9 @@ serve-no-open:
 serve-lan:
     @uv --project "{{ root }}" run win-models comfy serve-lan --comfy-home "{{ comfy_home }}" --model-root "{{ model_root }}" --port {{ port }} --open
 
+serve-tailscale:
+    @uv --project "{{ root }}" run win-models comfy serve-tailscale --comfy-home "{{ comfy_home }}" --model-root "{{ model_root }}" --port {{ port }} --open
+
 status:
     @uv --project "{{ root }}" run win-models comfy status --comfy-home "{{ comfy_home }}" --model-root "{{ model_root }}" --port {{ port }}
 

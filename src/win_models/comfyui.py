@@ -5,7 +5,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from .common import echo, ensure_dir, open_url, powershell, run
+from .common import echo, ensure_dir, open_url, output, powershell, run
 from .config import DEFAULT_COMFYUI_HOME, DEFAULT_COMFYUI_MODEL_ROOT, DEFAULT_COMFYUI_PORT
 
 
@@ -178,6 +178,25 @@ def port_owners(port: int) -> set[int]:
     return pids
 
 
+def tailscale_ipv4() -> str:
+    try:
+        value = output(["tailscale", "ip", "-4"]).strip().splitlines()[0].strip()
+        if value:
+            return value
+    except Exception:
+        pass
+
+    ps = (
+        "Get-NetIPAddress -AddressFamily IPv4 "
+        "| Where-Object { $_.InterfaceAlias -like '*Tailscale*' -or $_.IPAddress -like '100.*' } "
+        "| Select-Object -First 1 -ExpandProperty IPAddress"
+    )
+    value = powershell(ps, check=False).strip().splitlines()
+    if value and value[0].strip():
+        return value[0].strip()
+    raise RuntimeError("Could not determine Tailscale IPv4 address")
+
+
 def serve(args: argparse.Namespace) -> None:
     comfy_home = Path(args.comfy_home)
     python = venv_python(comfy_home)
@@ -315,6 +334,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lowvram", action="store_true")
     p.add_argument("--cpu", action="store_true")
     p.set_defaults(func=lambda args: serve(argparse.Namespace(**vars(args), host="0.0.0.0", lan=True)))
+
+    p = sub.add_parser("serve-tailscale")
+    add_common_args(p)
+    add_runtime_args(p)
+    p.add_argument("--port", type=int, default=DEFAULT_COMFYUI_PORT)
+    p.add_argument("--open", action="store_true")
+    p.add_argument("--lowvram", action="store_true")
+    p.add_argument("--cpu", action="store_true")
+    p.set_defaults(
+        func=lambda args: serve(
+            argparse.Namespace(
+                **vars(args),
+                host=f"127.0.0.1,{tailscale_ipv4()}",
+                lan=False,
+            )
+        )
+    )
 
     p = sub.add_parser("stop")
     p.add_argument("--port", type=int, default=DEFAULT_COMFYUI_PORT)
