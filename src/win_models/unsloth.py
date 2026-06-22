@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
+import sqlite3
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from .common import echo, ensure_dir, open_url, powershell, run
 from .config import DEFAULT_MODEL_ROOT, DEFAULT_STUDIO_HOME, DEFAULT_STUDIO_PORT
 
 
 LOCAL_ZIP_MARKER = "UNSLOTH_LOCAL_ZIP_SHIM"
+CHAT_TEMPLATE_OVERRIDE_SHIM_MARKER = "UNSLOTH_CHAT_TEMPLATE_OVERRIDE_SHIM"
+CLI_API_KEY_REUSE_SHIM_MARKER = "UNSLOTH_CLI_API_KEY_REUSE_SHIM"
+DEFAULT_MCP_CONFIG = (
+    Path(__file__).resolve().parents[1] / "unsloth" / "mcp-servers.json"
+)
 
 
 def resolve_unsloth_exe(studio_home: Path) -> Path:
@@ -33,6 +41,18 @@ def resolve_studio_python(studio_home: Path) -> Path:
 
 def studio_package_dir(studio_home: Path) -> Path:
     return studio_home / "unsloth_studio" / "Lib" / "site-packages" / "studio"
+
+
+def unsloth_cli_studio_command(studio_home: Path) -> Path:
+    return (
+        studio_home
+        / "unsloth_studio"
+        / "Lib"
+        / "site-packages"
+        / "unsloth_cli"
+        / "commands"
+        / "studio.py"
+    )
 
 
 def apply_llama_local_zip_shim(studio_home: Path) -> None:
@@ -72,6 +92,220 @@ def apply_llama_local_zip_shim(studio_home: Path) -> None:
 """
     target.write_text(text.replace(anchor, shim + "\n", 1), encoding="utf-8", newline="\n")
     echo("  applied llama local-zip shim to install_llama_prebuilt.py")
+
+
+def apply_chat_template_override_shim(studio_home: Path) -> None:
+    target = unsloth_cli_studio_command(studio_home)
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if CHAT_TEMPLATE_OVERRIDE_SHIM_MARKER in text:
+        echo("  chat-template override shim already present")
+        return
+
+    signature_anchor = (
+        "    llama_extra_args: Optional[List[str]] = None,\n"
+        "    timeout: int = 600,\n"
+    )
+    if signature_anchor not in text:
+        raise RuntimeError(
+            f"Could not find _load_model_via_http signature anchor in {target}; "
+            "the Studio CLI changed."
+        )
+    text = text.replace(
+        signature_anchor,
+        (
+            "    llama_extra_args: Optional[List[str]] = None,\n"
+            "    chat_template_override: Optional[str] = None,\n"
+            "    timeout: int = 600,\n"
+        ),
+        1,
+    )
+
+    payload_anchor = (
+        "    if llama_extra_args:\n"
+        "        payload[\"llama_extra_args\"] = list(llama_extra_args)\n\n"
+    )
+    if payload_anchor not in text:
+        raise RuntimeError(
+            f"Could not find _load_model_via_http payload anchor in {target}; "
+            "the Studio CLI changed."
+        )
+    text = text.replace(
+        payload_anchor,
+        (
+            payload_anchor
+            + "    if chat_template_override:\n"
+            + "        payload[\"chat_template_override\"] = chat_template_override\n\n"
+        ),
+        1,
+    )
+
+    load_anchor = None
+    load_indent = ""
+    for candidate_indent in ("    ", "        "):
+        candidate = (
+            f"{candidate_indent}# 5. Load model via HTTP.\n"
+            f"{candidate_indent}if not silent:\n"
+            f"{candidate_indent}    typer.echo(f\"Loading model: {{model}}...\")\n"
+            f"{candidate_indent}try:\n"
+        )
+        if candidate in text:
+            load_anchor = candidate
+            load_indent = candidate_indent
+            break
+    if load_anchor is None:
+        raise RuntimeError(
+            f"Could not find Studio run load anchor in {target}; the Studio CLI changed."
+        )
+    template_read = (
+        f"{load_indent}# UNSLOTH_CHAT_TEMPLATE_OVERRIDE_SHIM: allow win-models to feed a\n"
+        f"{load_indent}# repo-pinned Jinja template through Studio's first-class load field.\n"
+        f"{load_indent}chat_template_override = None\n"
+        f"{load_indent}chat_template_file = os.environ.get(\"UNSLOTH_CHAT_TEMPLATE_FILE\")\n"
+        f"{load_indent}if chat_template_file:\n"
+        f"{load_indent}    try:\n"
+        f"{load_indent}        chat_template_override = Path(chat_template_file).read_text(encoding=\"utf-8\")\n"
+        f"{load_indent}    except OSError as exc:\n"
+        f"{load_indent}        typer.echo(f\"Error: could not read UNSLOTH_CHAT_TEMPLATE_FILE={{chat_template_file}}: {{exc}}\", err=True)\n"
+        f"{load_indent}        raise typer.Exit(1)\n"
+        f"{load_indent}    if not silent:\n"
+        f"{load_indent}        typer.echo(f\"Using chat template override: {{chat_template_file}}\")\n\n"
+    )
+    text = text.replace(load_anchor, template_read + load_anchor, 1)
+
+    call_anchor = "                llama_extra_args = extra_llama_args,\n"
+    if call_anchor not in text:
+        call_anchor = "            llama_extra_args = extra_llama_args,\n"
+    if call_anchor not in text:
+        raise RuntimeError(
+            f"Could not find _load_model_via_http call anchor in {target}; "
+            "the Studio CLI changed."
+        )
+    text = text.replace(
+        call_anchor,
+        call_anchor + call_anchor.replace(
+            "llama_extra_args = extra_llama_args",
+            "chat_template_override = chat_template_override",
+        ),
+        1,
+    )
+
+    target.write_text(text, encoding="utf-8", newline="\n")
+    echo("  applied chat-template override shim to unsloth_cli.commands.studio")
+
+
+def apply_cli_api_key_reuse_shim(studio_home: Path) -> None:
+    target = unsloth_cli_studio_command(studio_home)
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if CLI_API_KEY_REUSE_SHIM_MARKER in text:
+        echo("  CLI API-key reuse shim already present")
+        return
+
+    anchor = '''def _create_api_key_inprocess(name: str) -> str:
+    """Create an API key via direct storage call (no HTTP needed).
+
+    Bypasses the ``must_change_password`` gate that blocks HTTP
+    ``POST /api/auth/api-keys`` on fresh installs.  Safe because the
+    CLI already has filesystem access to ``~/.unsloth/studio``.
+    """
+    storage = _load_backend_auth_storage()
+
+    raw_key, _row = storage.create_api_key(
+        username = storage.DEFAULT_ADMIN_USERNAME,
+        name = name,
+    )
+    return raw_key
+'''
+    if anchor not in text:
+        raise RuntimeError(
+            f"Could not find _create_api_key_inprocess anchor in {target}; "
+            "the Studio CLI changed."
+        )
+
+    replacement = '''def _create_api_key_inprocess(name: str) -> str:
+    """Create or reuse an API key via direct storage call (no HTTP needed).
+
+    Bypasses the ``must_change_password`` gate that blocks HTTP
+    ``POST /api/auth/api-keys`` on fresh installs.  Safe because the
+    CLI already has filesystem access to ``~/.unsloth/studio``.
+    """
+    storage = _load_backend_auth_storage()
+
+    # UNSLOTH_CLI_API_KEY_REUSE_SHIM: upstream creates a fresh visible
+    # key named "cli" on every `unsloth studio run`. Keep custom names
+    # upstream-compatible, but reuse one local raw key for the default.
+    reuse_enabled = os.environ.get("UNSLOTH_REUSE_CLI_API_KEY", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if name != "cli" or not reuse_enabled:
+        raw_key, _row = storage.create_api_key(
+            username = storage.DEFAULT_ADMIN_USERNAME,
+            name = name,
+        )
+        return raw_key
+
+    key_path = STUDIO_HOME / "auth" / "cli-api-key.txt"
+    try:
+        raw_key = key_path.read_text(encoding = "utf-8").strip()
+    except OSError:
+        raw_key = ""
+    if raw_key and storage.validate_api_key(raw_key) == storage.DEFAULT_ADMIN_USERNAME:
+        return raw_key
+
+    raw_key = storage.API_KEY_PREFIX + secrets.token_hex(16)
+    key_hash = storage._pbkdf2_api_key(raw_key)
+    key_prefix = raw_key[len(storage.API_KEY_PREFIX) : len(storage.API_KEY_PREFIX) + 8]
+    now = datetime.now(timezone.utc).isoformat()
+
+    conn = storage.get_connection()
+    try:
+        existing = conn.execute(
+            "SELECT id FROM api_keys WHERE key_hash = ?",
+            (key_hash,),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO api_keys (
+                    username, key_prefix, key_hash, name,
+                    created_at, expires_at, is_internal
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    storage.DEFAULT_ADMIN_USERNAME,
+                    key_prefix,
+                    key_hash,
+                    name,
+                    now,
+                    None,
+                    0,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE api_keys
+                   SET username = ?, name = ?, is_active = 1, expires_at = NULL
+                 WHERE id = ?
+                """,
+                (storage.DEFAULT_ADMIN_USERNAME, name, existing["id"]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    _write_auth_secret(key_path, raw_key)
+    return raw_key
+'''
+    target.write_text(text.replace(anchor, replacement, 1), encoding="utf-8", newline="\n")
+    echo("  applied CLI API-key reuse shim to unsloth_cli.commands.studio")
 
 
 def find_llama_zips(zip_dir: Path, release_tag: str, runtime: str) -> tuple[Path, Path]:
@@ -128,6 +362,179 @@ def install_unsloth_wrapper(studio_home: Path) -> None:
     echo(f"  wrote {bin_dir}\\unsloth.cmd (ensure {bin_dir} is on PATH)")
 
 
+def _resolve_secret_ref(secret: dict[str, Any]) -> str:
+    env_name = secret.get("env")
+    if env_name:
+        value = os.environ.get(str(env_name))
+        if value:
+            return value
+
+    op_ref = secret.get("op")
+    if op_ref:
+        completed = subprocess.run(
+            ["op", "read", str(op_ref)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or "op read failed"
+            raise RuntimeError(f"Could not resolve 1Password secret {op_ref}: {detail}")
+        value = completed.stdout.strip()
+        if not value:
+            raise RuntimeError(f"1Password secret {op_ref} resolved to an empty value")
+        return value
+
+    value = secret.get("value")
+    if value:
+        return str(value)
+    raise ValueError("secret must define one of: env, op, value")
+
+
+def _headers_from_mcp_server_config(server: dict[str, Any]) -> dict[str, str] | None:
+    headers = {str(k): str(v) for k, v in (server.get("headers") or {}).items()}
+    auth = server.get("authorization")
+    if isinstance(auth, dict):
+        auth_type = str(auth.get("type", "")).lower()
+        if auth_type == "bearer":
+            token = _resolve_secret_ref(auth)
+            headers["Authorization"] = f"Bearer {token}"
+        elif auth_type:
+            raise ValueError(f"Unsupported authorization type: {auth_type}")
+    return headers or None
+
+
+def _ensure_mcp_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mcp_servers (
+            id TEXT NOT NULL PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            headers_json TEXT,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            use_oauth INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(mcp_servers)").fetchall()}
+    if "use_oauth" not in cols:
+        conn.execute(
+            "ALTER TABLE mcp_servers ADD COLUMN use_oauth INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+def _sync_mcp_config(
+    studio_home: Path,
+    config_path: Path,
+    *,
+    dry_run: bool = False,
+) -> list[dict[str, Any]]:
+    if not config_path.exists():
+        raise FileNotFoundError(f"MCP config not found: {config_path}")
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    servers = payload.get("servers")
+    if not isinstance(servers, list):
+        raise ValueError(f"{config_path} must contain a top-level 'servers' list")
+
+    rows: list[dict[str, Any]] = []
+    for server in servers:
+        if not isinstance(server, dict):
+            raise ValueError("Each MCP server entry must be an object")
+        server_id = str(server.get("id", "")).strip()
+        display_name = str(server.get("display_name", "")).strip()
+        url = str(server.get("url", "")).strip()
+        if not server_id or not display_name or not url:
+            raise ValueError("Each MCP server must define id, display_name, and url")
+        headers = None if dry_run else _headers_from_mcp_server_config(server)
+        rows.append(
+            {
+                "id": server_id,
+                "display_name": display_name,
+                "url": url,
+                "headers_json": (
+                    json.dumps(headers, separators=(",", ":")) if headers else None
+                ),
+                "is_enabled": bool(server.get("is_enabled", True)),
+                "use_oauth": bool(server.get("use_oauth", False)),
+                "has_headers": bool(
+                    server.get("headers") or server.get("authorization")
+                ),
+            }
+        )
+
+    if dry_run:
+        return rows
+
+    db_path = studio_home / "studio.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        _ensure_mcp_schema(conn)
+        now_sql = "strftime('%Y-%m-%dT%H:%M:%f+00:00','now')"
+        for row in rows:
+            exists = conn.execute(
+                "SELECT 1 FROM mcp_servers WHERE id = ?", (row["id"],)
+            ).fetchone()
+            if exists:
+                conn.execute(
+                    f"""
+                    UPDATE mcp_servers
+                       SET display_name = ?,
+                           url = ?,
+                           headers_json = ?,
+                           is_enabled = ?,
+                           use_oauth = ?,
+                           updated_at = {now_sql}
+                     WHERE id = ?
+                    """,
+                    (
+                        row["display_name"],
+                        row["url"],
+                        row["headers_json"],
+                        int(row["is_enabled"]),
+                        int(row["use_oauth"]),
+                        row["id"],
+                    ),
+                )
+            else:
+                conn.execute(
+                    f"""
+                    INSERT INTO mcp_servers
+                        (id, display_name, url, headers_json,
+                         is_enabled, use_oauth, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, {now_sql}, {now_sql})
+                    """,
+                    (
+                        row["id"],
+                        row["display_name"],
+                        row["url"],
+                        row["headers_json"],
+                        int(row["is_enabled"]),
+                        int(row["use_oauth"]),
+                    ),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+    return rows
+
+
+def sync_mcp(args: argparse.Namespace) -> None:
+    studio_home = Path(args.studio_home)
+    config_path = Path(args.config)
+    rows = _sync_mcp_config(studio_home, config_path, dry_run=args.dry_run)
+    action = "Would sync" if args.dry_run else "Synced"
+    echo(f"{action} {len(rows)} MCP server(s) from {config_path}:")
+    for row in rows:
+        enabled = "enabled" if row["is_enabled"] else "disabled"
+        auth = "headers" if row["has_headers"] else "no headers"
+        echo(f"  {row['id']}: {row['display_name']} ({enabled}, {auth}) -> {row['url']}")
+
+
 def setup(args: argparse.Namespace) -> None:
     studio_home = Path(args.studio_home)
     model_root = Path(args.model_root)
@@ -141,6 +548,8 @@ def setup(args: argparse.Namespace) -> None:
 
     echo("\n[1/6] Patching llama.cpp prebuilt installer (local-zip shim)...")
     apply_llama_local_zip_shim(studio_home)
+    apply_chat_template_override_shim(studio_home)
+    apply_cli_api_key_reuse_shim(studio_home)
 
     echo(f"\n[2/6] Locating prebuilt zips in {zip_dir} ...")
     bin_zip, cudart_zip = find_llama_zips(zip_dir, args.release_tag, args.runtime)
@@ -184,9 +593,17 @@ def setup(args: argparse.Namespace) -> None:
     else:
         env.pop("SKIP_STUDIO_BASE", None)
     run([unsloth, "studio", "setup", "--verbose"], env=env)
+    apply_chat_template_override_shim(studio_home)
+    apply_cli_api_key_reuse_shim(studio_home)
 
-    echo(f"\n[5/6] Registering model folder {model_root} as a Studio scan folder...")
-    register_scan_folder(studio_home, model_root)
+    if args.register_model_root:
+        echo(f"\n[5/6] Registering model folder {model_root} as a Studio scan folder...")
+        register_scan_folder(studio_home, model_root)
+    else:
+        echo(
+            "\n[5/6] Skipping model-root scan-folder registration; "
+            "HF cache repos are discovered as downloaded models."
+        )
 
     echo("\n[6/6] Installing unsloth.cmd launcher...")
     install_unsloth_wrapper(studio_home)
@@ -196,15 +613,36 @@ def setup(args: argparse.Namespace) -> None:
 def serve(args: argparse.Namespace) -> None:
     studio_home = Path(args.studio_home)
     unsloth = resolve_unsloth_exe(studio_home)
+    apply_chat_template_override_shim(studio_home)
+    apply_cli_api_key_reuse_shim(studio_home)
+    if args.parallel < 1:
+        raise ValueError("--parallel must be at least 1")
     bind_host = "0.0.0.0" if args.lan else args.host
-    model = Path(args.model) if args.model else Path(args.model_root) / "gemma-4-12b-it-qat-q4_0" / "gemma-4-12b-it-qat-q4_0.gguf"
-    if not model.exists():
-        raise FileNotFoundError(f"Model not found: {model}")
+    model = args.model
+    model_path = Path(model)
+    is_local_model = (
+        model_path.is_absolute()
+        or model.startswith(".")
+        or "\\" in model
+        or model.lower().endswith(".gguf")
+    )
+    if is_local_model and not model_path.exists():
+        raise FileNotFoundError(f"Model not found: {model_path}")
 
     env = os.environ.copy()
     env["UNSLOTH_STUDIO_HOME"] = str(studio_home)
     env["LOG_LEVEL"] = args.log_level
     env["ENVIRONMENT_TYPE"] = "production"
+    if args.hf_cache_dir:
+        hf_cache_dir = Path(args.hf_cache_dir)
+        hf_cache_dir.mkdir(parents=True, exist_ok=True)
+        env["HUGGINGFACE_HUB_CACHE"] = str(hf_cache_dir)
+        env["HF_HUB_CACHE"] = str(hf_cache_dir)
+    if args.chat_template_file:
+        chat_template_file = Path(args.chat_template_file).resolve()
+        if not chat_template_file.is_file():
+            raise FileNotFoundError(f"Chat template file not found: {chat_template_file}")
+        env["UNSLOTH_CHAT_TEMPLATE_FILE"] = str(chat_template_file)
 
     port_check = powershell(f"Get-NetTCPConnection -LocalPort {args.port} -State Listen -ErrorAction SilentlyContinue", check=False)
     if port_check.strip():
@@ -213,7 +651,33 @@ def serve(args: argparse.Namespace) -> None:
             open_url(f"http://localhost:{args.port}")
         return
 
-    command = [unsloth, "studio", "run", "--model", model, "-H", bind_host, "-p", str(args.port), "--yes"]
+    command = [
+        unsloth,
+        "studio",
+        "run",
+        "--model",
+        model,
+        "--max-seq-length",
+        str(args.max_seq_length),
+        "--parallel",
+        str(args.parallel),
+        "-H",
+        bind_host,
+        "-p",
+        str(args.port),
+        "--yes",
+    ]
+    if args.max_seq_length > 0:
+        command.extend(["-c", str(args.max_seq_length)])
+    if args.cache_type_kv:
+        command.extend(
+            [
+                "--cache-type-k",
+                args.cache_type_kv,
+                "--cache-type-v",
+                args.cache_type_kv,
+            ]
+        )
     if args.enable_tools:
         command.append("--enable-tools")
     else:
@@ -222,6 +686,13 @@ def serve(args: argparse.Namespace) -> None:
         command.append("--verbose")
 
     echo(f"Starting Unsloth Studio on http://{bind_host}:{args.port}  (LOG_LEVEL={args.log_level})")
+    echo(f"Context length={args.max_seq_length}; parallel slots={args.parallel}; per-slot context={args.max_seq_length // args.parallel}")
+    if args.max_seq_length > 0:
+        echo(f"llama-server context override: -c {args.max_seq_length}")
+    if args.cache_type_kv:
+        echo(f"llama-server KV cache override: --cache-type-k {args.cache_type_kv} --cache-type-v {args.cache_type_kv}")
+    if args.chat_template_file:
+        echo(f"Studio chat template override: {Path(args.chat_template_file).resolve()}")
     echo("Backend output will stream in this terminal. Press Ctrl+C to stop.")
     echo(f"llama-server log: {studio_home}\\logs\\llama-server\\llama-*-port-*.log")
     if args.lan:
@@ -286,13 +757,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--release-tag", default="b9536")
     p.add_argument("--runtime", default="13.3")
     p.add_argument("--skip-base", action="store_true")
+    p.add_argument("--register-model-root", action="store_true")
     p.set_defaults(func=setup)
+
+    p = sub.add_parser("sync-mcp")
+    p.add_argument("--studio-home", default=str(DEFAULT_STUDIO_HOME))
+    p.add_argument("--config", default=str(DEFAULT_MCP_CONFIG))
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=sync_mcp)
 
     p = sub.add_parser("serve")
     p.add_argument("--studio-home", default=str(DEFAULT_STUDIO_HOME))
-    p.add_argument("--model-root", default=str(DEFAULT_MODEL_ROOT))
+    p.add_argument("--hf-cache-dir", default="")
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--model", default="")
+    p.add_argument("--model", required=True)
+    p.add_argument("--max-seq-length", type=int, required=True)
+    p.add_argument("--parallel", type=int, default=1)
+    p.add_argument("--cache-type-kv", default="q8_0")
+    p.add_argument("--chat-template-file", default="")
     p.add_argument("--port", type=int, default=DEFAULT_STUDIO_PORT)
     p.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
     p.add_argument("--lan", action="store_true")
@@ -307,7 +789,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=stop)
 
     p = sub.add_parser("register")
-    p.add_argument("path", nargs="?", default=str(DEFAULT_MODEL_ROOT))
+    p.add_argument("path")
     p.add_argument("--studio-home", default=str(DEFAULT_STUDIO_HOME))
     p.set_defaults(func=register)
     return parser

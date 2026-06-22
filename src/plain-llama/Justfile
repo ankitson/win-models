@@ -1,6 +1,10 @@
 set shell := ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
 
 model_root := env_var_or_default("WIN_MODELS_MODEL_ROOT", "E:\\root\\projects\\models")
+hf_cache := env_var_or_default("UNSLOTH_HF_CACHE", model_root)
+hf_token_file := env_var_or_default("WIN_MODELS_HF_TOKEN_FILE", root / "logs" / "hf-token.tmp")
+hf_token_op_ref := env_var_or_default("WIN_MODELS_HF_TOKEN_OP_REF", "op://clankers/huggingface-read/password")
+hf_download_python := env_var_or_default("WIN_MODELS_HF_DOWNLOAD_PYTHON", "3.13")
 host := env_var_or_default("WIN_MODELS_HOST", "0.0.0.0")
 llama_port := env_var_or_default("WIN_MODELS_LLAMA_PORT", "8080")
 litert_port := env_var_or_default("WIN_MODELS_LITERT_PORT", "9379")
@@ -12,6 +16,12 @@ default:
 download variant:
     @uv --project "{{ root }}" run win-models plain download "{{ variant }}" --model-root "{{ model_root }}"
 
+download-cache target="new-gemma-26b":
+    @Remove-Item Env:SSLKEYLOGFILE -ErrorAction SilentlyContinue; $env:HF_HUB_DISABLE_XET="1"; $env:HF_HUB_ENABLE_HF_TRANSFER="0"; uv --project "{{ root }}" run --python "{{ hf_download_python }}" win-models plain download-cache "{{ target }}" --hf-cache "{{ hf_cache }}" --token-file "{{ hf_token_file }}" --token-op-ref "{{ hf_token_op_ref }}"
+
+download-new26-cache:
+    @Remove-Item Env:SSLKEYLOGFILE -ErrorAction SilentlyContinue; $env:HF_HUB_DISABLE_XET="1"; $env:HF_HUB_ENABLE_HF_TRANSFER="0"; uv --project "{{ root }}" run --python "{{ hf_download_python }}" win-models plain download-cache "new-gemma-26b" --hf-cache "{{ hf_cache }}" --token-file "{{ hf_token_file }}" --token-op-ref "{{ hf_token_op_ref }}"
+
 download-ggml12:
     @uv --project "{{ root }}" run win-models plain download "ggml-12b-q4km" --model-root "{{ model_root }}"
 
@@ -20,6 +30,21 @@ download-litert-e4b:
 
 download-unsloth26:
     @uv --project "{{ root }}" run win-models plain download "unsloth-26b-q3km" --model-root "{{ model_root }}"
+
+download-unsloth26-q6kxl:
+    @uv --project "{{ root }}" run win-models plain download "unsloth-26b-q6kxl" --model-root "{{ model_root }}"
+
+download-unsloth26-q8kxl:
+    @uv --project "{{ root }}" run win-models plain download "unsloth-26b-q8kxl" --model-root "{{ model_root }}"
+
+download-unsloth26-q8:
+    @uv --project "{{ root }}" run win-models plain download "unsloth-26b-q8" --model-root "{{ model_root }}"
+
+download-google26-base-q4km:
+    @uv --project "{{ root }}" run win-models plain download "google-26b-a4b-q4km" --model-root "{{ model_root }}"
+
+download-google26-base-q8:
+    @uv --project "{{ root }}" run win-models plain download "google-26b-a4b-q8" --model-root "{{ model_root }}"
 
 serve-google-qat12:
     @uv --project "{{ root }}" run win-models plain serve google-qat12 --model-root "{{ model_root }}" --host "{{ host }}" --port {{ llama_port }} --reasoning on
@@ -32,6 +57,21 @@ serve-ggml12:
 
 serve-unsloth26:
     @uv --project "{{ root }}" run win-models plain serve unsloth-26b-q3km --model-root "{{ model_root }}" --host "{{ host }}" --port {{ llama_port }} --reasoning on
+
+serve-unsloth26-q6kxl:
+    @uv --project "{{ root }}" run win-models plain serve unsloth-26b-q6kxl --model-root "{{ model_root }}" --host "{{ host }}" --port {{ llama_port }} --reasoning on
+
+serve-unsloth26-q8kxl:
+    @uv --project "{{ root }}" run win-models plain serve unsloth-26b-q8kxl --model-root "{{ model_root }}" --host "{{ host }}" --port {{ llama_port }} --reasoning on
+
+serve-unsloth26-q8:
+    @uv --project "{{ root }}" run win-models plain serve unsloth-26b-q8 --model-root "{{ model_root }}" --host "{{ host }}" --port {{ llama_port }} --reasoning on
+
+serve-google26-base-q4km:
+    @uv --project "{{ root }}" run win-models plain serve google-26b-a4b-q4km --model-root "{{ model_root }}" --host "{{ host }}" --port {{ llama_port }} --reasoning on
+
+serve-google26-base-q8:
+    @uv --project "{{ root }}" run win-models plain serve google-26b-a4b-q8 --model-root "{{ model_root }}" --host "{{ host }}" --port {{ llama_port }} --reasoning on
 
 serve-unsloth26-lowvram:
     @uv --project "{{ root }}" run win-models plain serve unsloth-26b-q3km --model-root "{{ model_root }}" --host "{{ host }}" --port {{ llama_port }} --reasoning on --gpu-layers 20 --cache-ram 0

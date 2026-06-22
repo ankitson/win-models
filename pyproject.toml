@@ -3,7 +3,9 @@ name = "win-models"
 version = "0.1.0"
 description = "Local Windows model server helpers for llama.cpp and Unsloth Studio."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "huggingface-hub>=0.30,<0.31",
+]
 
 [project.scripts]
 win-models = "win_models.cli:main"
@@ -11,4 +13,3 @@ win-models = "win_models.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-

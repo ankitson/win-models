@@ -32,12 +32,25 @@ just plain serve-google-qat12
 just plain bench gemma-4-12b-qat
 ```
 
+Download the new Gemma 26B variants into the Hugging Face cache layout used by
+Unsloth Studio:
+
+```powershell
+just plain download-new26-cache
+```
+
 Utilities:
 
 ```powershell
 just utils status
 just utils monitor
 just utils firewall-allow 8080
+```
+
+Declarative Unsloth MCP sync:
+
+```powershell
+just unsloth sync-mcp
 ```
 
 See [UNSLOTH.md](UNSLOTH.md) for Studio details and [BENCHMARKS.md](BENCHMARKS.md)
@@ -53,8 +66,17 @@ for local benchmark notes.
 
 - `google-qat12`: official Google Gemma 4 12B IT QAT Q4_0 GGUF with multimodal projector.
 - `ggml-12b-q4km`: ggml-org Gemma 4 12B IT Q4_K_M GGUF with Q8_0 projector.
+- `google-26b-a4b-q4km`: Google Gemma 4 26B-A4B base Q4_K_M GGUF.
+- `google-26b-a4b-q8`: Google Gemma 4 26B-A4B base Q8_0 GGUF.
 - `litert-e4b`: LiteRT-LM Gemma 4 E4B IT `.litertlm`.
 - `unsloth-26b-q3km`: Unsloth Gemma 4 26B-A4B IT UD-Q3_K_M GGUF.
+- `unsloth-26b-q6kxl`: Unsloth Gemma 4 26B-A4B IT UD-Q6_K_XL GGUF.
+- `unsloth-26b-q8kxl`: Unsloth Gemma 4 26B-A4B IT UD-Q8_K_XL GGUF.
+- `unsloth-26b-q8`: Unsloth Gemma 4 26B-A4B IT Q8_0 GGUF.
+
+Model groups:
+
+- `new-gemma-26b`: `unsloth-26b-q6kxl`, `unsloth-26b-q8kxl`, `unsloth-26b-q8`, `google-26b-a4b-q4km`, and `google-26b-a4b-q8`.
 
 ## Configuration
 
@@ -62,6 +84,16 @@ Defaults can be overridden with environment variables:
 
 - `WIN_MODELS_MODEL_ROOT`, default `E:\root\projects\models`
 - `UNSLOTH_STUDIO_HOME`, default `E:\root\projects\unsloth`
+- `UNSLOTH_DEFAULT_MODEL`, default `unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q8_K_XL`
+- `UNSLOTH_CONTEXT_LENGTH`, default `262144`; passed as `unsloth studio run --max-seq-length` and llama-server `-c`.
+- `UNSLOTH_CACHE_TYPE_KV`, default `q8_0`; passed as llama-server `--cache-type-k` and `--cache-type-v`.
+- `UNSLOTH_CHAT_TEMPLATE_FILE`, default `src\unsloth\chat-templates\gemma-4-31b-it-pr118.jinja`; passed as Studio `chat_template_override`.
+- `UNSLOTH_HF_CACHE`, default `WIN_MODELS_MODEL_ROOT`; controls where Studio/HF downloads are cached.
+- `UNSLOTH_REUSE_CLI_API_KEY`, default `1`; reuses `UNSLOTH_STUDIO_HOME\auth\cli-api-key.txt` instead of creating a new `cli` API key on each Studio startup.
+- `WIN_MODELS_HF_DOWNLOAD_PYTHON`, default `3.13`; Python runtime used for Hugging Face cache downloads.
+- `WIN_MODELS_HF_TOKEN_FILE`, default `logs\hf-token.tmp`; temporary local token file used by `download-cache` when `HF_TOKEN` is unset.
+- `WIN_MODELS_HF_TOKEN_OP_REF`, default `op://clankers/huggingface-read/password`; used by `download-cache` when `HF_TOKEN` is unset.
+- `MCPPROXY_AGENTS_TOKEN`, optional override for the 1Password MCP bearer token.
 - `WIN_MODELS_HOST`, default `0.0.0.0`
 - `WIN_MODELS_LLAMA_PORT`, default `8080`
 - `WIN_MODELS_LITERT_PORT`, default `9379`

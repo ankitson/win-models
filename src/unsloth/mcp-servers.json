@@ -1,0 +1,28 @@
+{
+  "servers": [
+    {
+      "id": "agents",
+      "display_name": "MCP Proxy Agents",
+      "url": "https://mcp.dev.ankitson.com/mcp",
+      "authorization": {
+        "type": "bearer",
+        "op": "op://clankers/mcpproxy-agents/password",
+        "env": "MCPPROXY_AGENTS_TOKEN"
+      },
+      "is_enabled": true,
+      "use_oauth": false
+    },
+    {
+      "id": "code",
+      "display_name": "MCP Proxy Agents (Code Mode)",
+      "url": "https://mcp.dev.ankitson.com/mcp/code",
+      "authorization": {
+        "type": "bearer",
+        "op": "op://clankers/mcpproxy-agents/password",
+        "env": "MCPPROXY_AGENTS_TOKEN"
+      },
+      "is_enabled": true,
+      "use_oauth": false
+    }
+  ]
+}

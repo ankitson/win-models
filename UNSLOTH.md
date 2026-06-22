@@ -9,6 +9,14 @@ commands live in `src/unsloth/Justfile` and call the Python package through `uv`
   (`UNSLOTH_STUDIO_HOME` can override it).
 - Model root: `E:\root\projects\models`
   (`WIN_MODELS_MODEL_ROOT` can override it).
+- Default model: `unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q8_K_XL`
+  (`UNSLOTH_DEFAULT_MODEL` can override it).
+- Context length: `262144` (`UNSLOTH_CONTEXT_LENGTH` can override it).
+- KV cache type: `q8_0` (`UNSLOTH_CACHE_TYPE_KV` can override it).
+- Chat template override: `src/unsloth/chat-templates/gemma-4-31b-it-pr118.jinja`
+  (`UNSLOTH_CHAT_TEMPLATE_FILE` can override it; set it to empty to disable).
+- Hugging Face cache for Studio downloads: `WIN_MODELS_MODEL_ROOT`
+  (`UNSLOTH_HF_CACHE` can override it).
 - Backend output streams in the terminal that launched Studio.
 - Studio's internal `llama-server` still writes per-model logs under
   `E:\root\projects\unsloth\logs\llama-server`.
@@ -21,15 +29,70 @@ repeatable after that venv exists.
 
 ```powershell
 just unsloth setup            # patch installer, install llama.cpp, register models, write wrapper
+just unsloth sync-mcp         # sync declarative MCP servers into Studio
 just unsloth serve            # foreground server on 127.0.0.1:8888, opens browser
 just unsloth serve-lan        # bind 0.0.0.0 for LAN access
 just unsloth serve-debug      # LOG_LEVEL=DEBUG, foreground output
 just unsloth stop             # cleanup a stale/separately-launched Studio server
-just unsloth register-models  # register E:\root\projects\models as a scan folder
+just unsloth register-models <path>  # register a separate non-cache custom folder
 ```
 
 `serve` uses `unsloth studio run --model ...`, which is the Unsloth command form
-that supports preloading the default model from `WIN_MODELS_MODEL_ROOT`.
+that supports preloading the model configured by `UNSLOTH_DEFAULT_MODEL`.
+The serve recipes also pass llama-server overrides for context length and KV
+cache dtype so Studio does not fall back to `4096` context or `f16` KV cache.
+For Gemma 4 instruction-tuned GGUFs, they also pass a repo-pinned
+`chat_template_override` through Studio's load API so Studio's reasoning/tool
+capability detection sees the same template that llama-server renders.
+
+The launcher patches Studio's CLI to reuse a single default `cli` API key from
+`E:\root\projects\unsloth\auth\cli-api-key.txt`. Set
+`UNSLOTH_REUSE_CLI_API_KEY=0` to restore Studio's upstream behavior of creating
+a fresh `cli` key on every `unsloth studio run`.
+
+`E:\root\projects\models` is used as the Hugging Face cache root. It should not
+also be registered as a custom scan folder, because Studio lists HF cache repos
+as downloaded models already and intentionally keeps custom-folder entries even
+when they duplicate cached models. `just unsloth setup` therefore does not
+register the model root by default; use `just unsloth register-models <path>`
+only for a separate folder that is not the HF cache.
+
+## Gemma 4 Chat Template
+
+The default template override is pinned from:
+
+```text
+https://huggingface.co/google/gemma-4-31B-it/raw/refs%2Fpr%2F118/chat_template.jinja
+```
+
+That PR adds `preserve_thinking`, OpenAI-compatible `image_url` and
+`input_audio` content type handling, and fixes tool-call formatting edge cases.
+This is a runtime override for Studio/llama-server; it does not rewrite GGUF
+metadata. When updated GGUFs are republished with the fixed embedded template,
+set `UNSLOTH_CHAT_TEMPLATE_FILE=` to disable the override.
+
+## MCP Tools
+
+MCP servers are declared in `src/unsloth/mcp-servers.json` and synced into
+Studio's `studio.db` with:
+
+```powershell
+just unsloth sync-mcp
+```
+
+The default serve recipes run that sync before launching Studio. The checked-in
+manifest registers:
+
+- `https://mcp.dev.ankitson.com/mcp`
+- `https://mcp.dev.ankitson.com/mcp/code`
+
+Both use `op://clankers/mcpproxy-agents/password` as a bearer token. The secret
+reference is stored in the manifest; the resolved token is written only to
+Studio's local MCP server table. If needed, `MCPPROXY_AGENTS_TOKEN` overrides the
+1Password lookup.
+
+In Studio chat, enable the MCP composer control for local tool-capable models.
+For API calls, pass `mcp_enabled: true` with tool-enabled requests.
 
 ## Stopping
 
@@ -68,14 +131,43 @@ Studio uses cuda-13.3.
 
 ## Models
 
-Studio lists GGUF and HF safetensors/bin folders under registered scan folders.
-From the default model root, that surfaces:
+Studio lists Hugging Face cache repos under Downloaded Models. From the default
+cache root, that surfaces:
 
 - `gemma-4-12b-it-qat-q4_0`
+- `google-gemma-4-26b-a4b-q4km`
+- `google-gemma-4-26b-a4b-q8_0`
 - `ggml-org-gemma-4-12b-it-q4km`
-- `unsloth-gemma-4-26b-a4b-it-ud-q3km`
+- `unsloth-gemma-4-26b-a4b-it-ud-q6kxl`
+- `unsloth-gemma-4-26b-a4b-it-ud-q8kxl`
+- `unsloth-gemma-4-26b-a4b-it-q8_0`
 
+Legacy plain folders under `E:\root\projects\models` are for direct llama.cpp or
+LiteRT recipes only. They are not registered with Studio, so they should not
+appear under Custom Folders unless you explicitly register that root again.
 LiteRT `.litertlm` files are not GGUF models, so Studio correctly ignores them.
+
+## Download Location
+
+Studio uses Hugging Face cache layout for repository downloads. With the repo
+recipes, `HUGGINGFACE_HUB_CACHE` is set to `UNSLOTH_HF_CACHE`, which defaults to
+`WIN_MODELS_MODEL_ROOT`. A download like:
+
+```text
+unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q8_K_XL
+```
+
+lands under:
+
+```text
+E:\root\projects\models\models--unsloth--gemma-4-26B-A4B-it-GGUF
+```
+
+Previously, without that env var, it used the normal user HF cache:
+
+```text
+C:\Users\ankit\.cache\huggingface\hub
+```
 
 ## Logging
 
