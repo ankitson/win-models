@@ -8,6 +8,7 @@ port := env_var_or_default("COMFYUI_PORT", "8188")
 python := env_var_or_default("COMFYUI_PYTHON", "3.13")
 torch := env_var_or_default("COMFYUI_TORCH", "nvidia")
 torch_index_url := env_var_or_default("COMFYUI_TORCH_INDEX_URL", "https://download.pytorch.org/whl/cu130")
+log_dir := env_var_or_default("COMFYUI_LOG_DIR", root / "logs")
 
 default:
     @just --justfile "{{ module_directory() }}/Justfile" --working-directory "{{ module_directory() }}" --list
@@ -35,3 +36,6 @@ status:
 
 stop:
     @uv --project "{{ root }}" run win-models comfy stop --port {{ port }}
+
+logs lines="120":
+    @Get-Content -Tail {{ lines }} -Wait "{{ log_dir }}/comfyui.out.log", "{{ log_dir }}/comfyui.err.log"

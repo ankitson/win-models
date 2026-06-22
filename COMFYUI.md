@@ -25,6 +25,7 @@ just comfy serve-lan      # bind 0.0.0.0 for LAN access
 just comfy serve-tailscale # bind localhost and the Tailscale IPv4
 just comfy status         # show checkout/venv/port state
 just comfy stop           # stop the process listening on COMFYUI_PORT
+just comfy logs           # tail running ComfyUI logs
 ```
 
 The setup path follows ComfyUI's manual install flow: clone the upstream repo,
