@@ -38,4 +38,4 @@ stop:
     @uv --project "{{ root }}" run win-models comfy stop --port {{ port }}
 
 logs lines="120":
-    @Get-Content -Tail {{ lines }} -Wait "{{ log_dir }}/comfyui.out.log", "{{ log_dir }}/comfyui.err.log"
+    @Write-Host "Tailing ComfyUI logs from {{ log_dir }}"; Get-Content -Tail {{ lines }} -Wait "{{ log_dir }}/comfyui.err.log", "{{ log_dir }}/comfyui.out.log"
