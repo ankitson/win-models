@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 
 from .common import echo, powershell, stop_process_names
-from .config import DEFAULT_LITERT_PORT, DEFAULT_LLAMA_PORT
+from .config import DEFAULT_COMFYUI_PORT, DEFAULT_LITERT_PORT, DEFAULT_LLAMA_PORT
 
 
 def status(args: argparse.Namespace) -> None:
@@ -18,7 +18,7 @@ def status(args: argparse.Namespace) -> None:
     echo("\nPorts")
     print(
         powershell(
-            f"Get-NetTCPConnection -LocalPort {args.llama_port},{args.litert_port} -ErrorAction SilentlyContinue "
+            f"Get-NetTCPConnection -LocalPort {args.llama_port},{args.litert_port},{args.comfy_port} -ErrorAction SilentlyContinue "
             "| Select-Object LocalAddress,LocalPort,State,OwningProcess | Format-Table -AutoSize",
             check=False,
         ).rstrip()
@@ -53,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("status")
     p.add_argument("--llama-port", type=int, default=DEFAULT_LLAMA_PORT)
     p.add_argument("--litert-port", type=int, default=DEFAULT_LITERT_PORT)
+    p.add_argument("--comfy-port", type=int, default=DEFAULT_COMFYUI_PORT)
     p.set_defaults(func=status)
 
     p = sub.add_parser("stop")
@@ -64,4 +65,3 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.func(args)
-

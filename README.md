@@ -1,12 +1,13 @@
 # Win Models
 
-Small Windows setup for running local model servers through either direct
-`llama.cpp`/LiteRT commands or Unsloth Studio.
+Small Windows setup for running local model servers through direct
+`llama.cpp`/LiteRT commands, Unsloth Studio, or ComfyUI.
 
 ## Layout
 
 - `src/plain-llama`: direct local model servers and downloads, backed by Python.
 - `src/unsloth`: Unsloth Studio setup, model registration, serve, and cleanup.
+- `src/comfyui`: ComfyUI setup, update, serve, and cleanup.
 - `src/utils`: Windows-specific utilities such as firewall and VRAM monitoring.
 - `src/win_models`: the Python package used by the just recipes.
 
@@ -32,6 +33,13 @@ just plain serve-google-qat12
 just plain bench gemma-4-12b-qat
 ```
 
+ComfyUI:
+
+```powershell
+just comfy setup
+just comfy serve
+```
+
 Download the new Gemma 26B variants into the Hugging Face cache layout used by
 Unsloth Studio:
 
@@ -53,14 +61,15 @@ Declarative Unsloth MCP sync:
 just unsloth sync-mcp
 ```
 
-See [UNSLOTH.md](UNSLOTH.md) for Studio details and [BENCHMARKS.md](BENCHMARKS.md)
-for local benchmark notes.
+See [UNSLOTH.md](UNSLOTH.md) for Studio details, [COMFYUI.md](COMFYUI.md) for
+ComfyUI details, and [BENCHMARKS.md](BENCHMARKS.md) for local benchmark notes.
 
 ## Useful Endpoints
 
 - llama.cpp server: `http://localhost:8080/v1`
 - LiteRT-LM server: `http://localhost:9379/v1`
 - Unsloth Studio server: `http://localhost:8888/v1`
+- ComfyUI server: `http://localhost:8188`
 
 ## Variants
 
@@ -84,6 +93,11 @@ Defaults can be overridden with environment variables:
 
 - `WIN_MODELS_MODEL_ROOT`, default `E:\root\projects\models`
 - `UNSLOTH_STUDIO_HOME`, default `E:\root\projects\unsloth`
+- `COMFYUI_HOME`, default `E:\root\projects\comfyui`
+- `COMFYUI_MODEL_ROOT`, default `WIN_MODELS_MODEL_ROOT\comfyui`
+- `COMFYUI_PYTHON`, default `3.13`
+- `COMFYUI_TORCH`, default `nvidia`; can be `nvidia`, `cpu`, or `skip`.
+- `COMFYUI_TORCH_INDEX_URL`, default `https://download.pytorch.org/whl/cu130`
 - `UNSLOTH_DEFAULT_MODEL`, default `unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q8_K_XL`
 - `UNSLOTH_CONTEXT_LENGTH`, default `262144`; passed as `unsloth studio run --max-seq-length` and llama-server `-c`.
 - `UNSLOTH_CACHE_TYPE_KV`, default `q8_0`; passed as llama-server `--cache-type-k` and `--cache-type-v`.
@@ -98,6 +112,8 @@ Defaults can be overridden with environment variables:
 - `WIN_MODELS_LLAMA_PORT`, default `8080`
 - `WIN_MODELS_LITERT_PORT`, default `9379`
 - `WIN_MODELS_STUDIO_PORT`, default `8888`
+- `COMFYUI_HOST`, default `127.0.0.1`
+- `COMFYUI_PORT`, default `8188`
 
 Server recipes run in the foreground so logs and failures are visible in the
 terminal. Use Ctrl+C to stop normal foreground servers.

@@ -1,0 +1,34 @@
+set shell := ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+
+root := module_directory() / "../.."
+comfy_home := env_var_or_default("COMFYUI_HOME", "E:\\root\\projects\\comfyui")
+model_root := env_var_or_default("COMFYUI_MODEL_ROOT", env_var_or_default("WIN_MODELS_MODEL_ROOT", "E:\\root\\projects\\models") / "comfyui")
+host := env_var_or_default("COMFYUI_HOST", "127.0.0.1")
+port := env_var_or_default("COMFYUI_PORT", "8188")
+python := env_var_or_default("COMFYUI_PYTHON", "3.13")
+torch := env_var_or_default("COMFYUI_TORCH", "nvidia")
+torch_index_url := env_var_or_default("COMFYUI_TORCH_INDEX_URL", "https://download.pytorch.org/whl/cu130")
+
+default:
+    @just --justfile "{{ module_directory() }}/Justfile" --working-directory "{{ module_directory() }}" --list
+
+setup:
+    @uv --project "{{ root }}" run win-models comfy setup --comfy-home "{{ comfy_home }}" --model-root "{{ model_root }}" --python "{{ python }}" --torch "{{ torch }}" --torch-index-url "{{ torch_index_url }}"
+
+update:
+    @uv --project "{{ root }}" run win-models comfy update --comfy-home "{{ comfy_home }}" --model-root "{{ model_root }}" --torch "{{ torch }}" --torch-index-url "{{ torch_index_url }}"
+
+serve:
+    @uv --project "{{ root }}" run win-models comfy serve --comfy-home "{{ comfy_home }}" --model-root "{{ model_root }}" --host "{{ host }}" --port {{ port }} --open
+
+serve-no-open:
+    @uv --project "{{ root }}" run win-models comfy serve --comfy-home "{{ comfy_home }}" --model-root "{{ model_root }}" --host "{{ host }}" --port {{ port }}
+
+serve-lan:
+    @uv --project "{{ root }}" run win-models comfy serve-lan --comfy-home "{{ comfy_home }}" --model-root "{{ model_root }}" --port {{ port }} --open
+
+status:
+    @uv --project "{{ root }}" run win-models comfy status --comfy-home "{{ comfy_home }}" --model-root "{{ model_root }}" --port {{ port }}
+
+stop:
+    @uv --project "{{ root }}" run win-models comfy stop --port {{ port }}
