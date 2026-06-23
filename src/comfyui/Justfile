@@ -42,4 +42,7 @@ logs lines="120":
     @Write-Host "Tailing ComfyUI logs from {{ log_dir }}"; Get-Content -Tail {{ lines }} -Wait "{{ log_dir }}/comfyui.err.log", "{{ log_dir }}/comfyui.out.log"
 
 prompt-logs lines="20":
-    @Write-Host "Tailing ComfyUI prompt JSONL log: {{ prompt_log_file }}"; Get-Content -Tail {{ lines }} -Wait "{{ prompt_log_file }}"
+    @uv --project "{{ root }}" run win-models comfy prompt-logs --file "{{ prompt_log_file }}" --lines {{ lines }} --follow
+
+st-workflow workflow name="" extra="":
+    @uv --project "{{ root }}" run win-models comfy st-workflow "{{ workflow }}" {{ if name == "" { "" } else { "--name " + quote(name) } }} {{ extra }}

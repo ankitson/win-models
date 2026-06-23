@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
+from typing import Any
 
 from .common import echo, ensure_dir, open_url, output, powershell, run
 from .config import DEFAULT_COMFYUI_HOME, DEFAULT_COMFYUI_MODEL_ROOT, DEFAULT_COMFYUI_PORT
@@ -32,6 +37,7 @@ MODEL_SUBDIRS = (
     "upscale_models",
     "vae",
 )
+SILLYTAVERN_WORKFLOW_DIR = REPO_ROOT / "outputs"
 
 
 def venv_python(comfy_home: Path) -> Path:
@@ -221,6 +227,359 @@ def tailscale_ipv4() -> str:
     raise RuntimeError("Could not determine Tailscale IPv4 address")
 
 
+def load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json(path: Path, payload: Any) -> None:
+    ensure_dir(path.parent)
+    path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def sort_node_ids(node_ids: Any) -> list[str]:
+    def key(value: Any) -> tuple[int, Any]:
+        text = str(value)
+        if text.isdigit():
+            return (0, int(text))
+        return (1, text)
+
+    return sorted((str(node_id) for node_id in node_ids), key=key)
+
+
+def compact_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def format_prompt_log_line(line: str) -> list[str]:
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return [line.rstrip()]
+
+    payload = record.get("payload", {}) if isinstance(record, dict) else {}
+    prompt = payload.get("prompt") if isinstance(payload, dict) else None
+    if not isinstance(prompt, dict):
+        return [compact_json(record)]
+
+    header = {
+        "time": record.get("time"),
+        "client_id": payload.get("client_id"),
+        "nodes": len(prompt),
+    }
+    lines = [compact_json(header)]
+    for node_id in sort_node_ids(prompt.keys()):
+        node = prompt[node_id]
+        if not isinstance(node, dict):
+            lines.append(compact_json({"id": node_id, "value": node}))
+            continue
+        line_payload = {
+            "id": node_id,
+            "class_type": node.get("class_type"),
+            "title": (node.get("_meta") or {}).get("title"),
+            "inputs": node.get("inputs", {}),
+        }
+        lines.append(compact_json(line_payload))
+    return lines
+
+
+def tail_lines(path: Path, lines: int) -> list[str]:
+    if lines <= 0:
+        return []
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        return handle.readlines()[-lines:]
+
+
+def follow_file(path: Path, start_at_end: bool) -> Any:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8", errors="replace") as handle:
+        if start_at_end:
+            handle.seek(0, os.SEEK_END)
+        else:
+            handle.seek(0)
+        while True:
+            line = handle.readline()
+            if line:
+                yield line
+            else:
+                time.sleep(0.5)
+
+
+def prompt_logs(args: argparse.Namespace) -> None:
+    path = Path(args.file)
+    echo(f"Tailing ComfyUI prompt log: {path}")
+    for line in tail_lines(path, args.lines):
+        for formatted in format_prompt_log_line(line):
+            print(formatted)
+        print()
+    if not args.follow:
+        return
+    for line in follow_file(path, start_at_end=True):
+        for formatted in format_prompt_log_line(line):
+            print(formatted)
+        print()
+
+
+def fetch_object_info(comfy_url: str) -> dict[str, Any]:
+    url = comfy_url.rstrip("/") + "/object_info"
+    with urllib.request.urlopen(url, timeout=15) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def is_api_workflow(payload: Any) -> bool:
+    if not isinstance(payload, dict) or not payload:
+        return False
+    return all(
+        isinstance(value, dict) and "class_type" in value and "inputs" in value
+        for value in payload.values()
+    )
+
+
+def is_ui_workflow(payload: Any) -> bool:
+    return isinstance(payload, dict) and isinstance(payload.get("nodes"), list)
+
+
+def input_type(spec: Any) -> str | None:
+    if isinstance(spec, list) and spec:
+        value = spec[0]
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def widget_input_names(node_info: dict[str, Any]) -> list[str]:
+    inputs = node_info.get("input", {})
+    input_order = node_info.get("input_order", {})
+    names: list[str] = []
+    for group in ("required", "optional"):
+        ordered = input_order.get(group) or list((inputs.get(group) or {}).keys())
+        for name in ordered:
+            spec = (inputs.get(group) or {}).get(name)
+            kind = input_type(spec)
+            if kind in {"MODEL", "CLIP", "VAE", "CONDITIONING", "LATENT", "IMAGE", "MASK"}:
+                continue
+            names.append(name)
+    return names
+
+
+def api_links_from_ui_workflow(payload: dict[str, Any]) -> dict[tuple[int, str], list[Any]]:
+    nodes = {int(node["id"]): node for node in payload.get("nodes", []) if "id" in node}
+    api_links: dict[tuple[int, str], list[Any]] = {}
+    for link in payload.get("links", []):
+        if not isinstance(link, list) or len(link) < 5:
+            continue
+        _link_id, origin_id, origin_slot, target_id, target_slot = link[:5]
+        target = nodes.get(int(target_id))
+        if not target:
+            continue
+        inputs = target.get("inputs") or []
+        if int(target_slot) >= len(inputs):
+            continue
+        input_name = inputs[int(target_slot)].get("name")
+        if input_name:
+            api_links[(int(target_id), str(input_name))] = [str(origin_id), int(origin_slot)]
+    return api_links
+
+
+def ui_workflow_to_api(payload: dict[str, Any], object_info: dict[str, Any]) -> dict[str, Any]:
+    api_links = api_links_from_ui_workflow(payload)
+    result: dict[str, Any] = {}
+    for node in payload.get("nodes", []):
+        node_id = int(node.get("id"))
+        class_type = node.get("type")
+        if not class_type or class_type not in object_info:
+            continue
+        if node.get("mode") == 2:
+            continue
+
+        node_info = object_info[class_type]
+        inputs: dict[str, Any] = {}
+        for input_node in node.get("inputs") or []:
+            input_name = input_node.get("name")
+            if input_name and (node_id, input_name) in api_links:
+                inputs[input_name] = api_links[(node_id, input_name)]
+
+        widget_values = list(node.get("widgets_values") or [])
+        widget_index = 0
+        input_specs = node_info.get("input", {})
+        for input_name in widget_input_names(node_info):
+            if input_name in inputs or widget_index >= len(widget_values):
+                continue
+            inputs[input_name] = widget_values[widget_index]
+            widget_index += 1
+            spec = (input_specs.get("required") or {}).get(input_name)
+            spec = spec or (input_specs.get("optional") or {}).get(input_name)
+            if (
+                isinstance(spec, list)
+                and len(spec) > 1
+                and isinstance(spec[1], dict)
+                and spec[1].get("control_after_generate")
+                and widget_index < len(widget_values)
+            ):
+                widget_index += 1
+
+        result[str(node_id)] = {
+            "class_type": class_type,
+            "_meta": {"title": node.get("title") or class_type},
+            "inputs": inputs,
+        }
+    return result
+
+
+def parse_path_value(value: str) -> tuple[str, str, str]:
+    if "=" not in value:
+        raise ValueError(f"Expected NODE.INPUT=VALUE, got: {value}")
+    path, replacement = value.split("=", 1)
+    if "." not in path:
+        raise ValueError(f"Expected NODE.INPUT=VALUE, got: {value}")
+    node_id, input_name = path.split(".", 1)
+    return node_id, input_name, replacement
+
+
+def template_token(name: str, *, quoted: bool = False) -> str:
+    if name.startswith("%") and name.endswith("%"):
+        token = name
+    else:
+        token = f"%{name}%"
+    if quoted:
+        return f'"{token}"'
+    return token
+
+
+def coerce_value(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def text_with_appended_placeholder(value: Any, name: str) -> str:
+    text = "" if value is None else str(value).strip()
+    token = template_token(name, quoted=True)
+    if not text:
+        return token
+    if token in text:
+        return text
+    separator = "" if text.endswith((",", " ")) else ", "
+    return f"{text}{separator}{token}"
+
+
+def text_with_prepended_placeholder(value: Any, name: str) -> str:
+    text = "" if value is None else str(value).strip()
+    token = template_token(name, quoted=True)
+    if not text:
+        return token
+    if token in text:
+        return text
+    return f"{token}, {text}"
+
+
+def text_with_placeholder_before(value: Any, name_and_marker: str) -> str:
+    if "::" not in name_and_marker:
+        raise ValueError(
+            "Expected NODE.INPUT=NAME::MARKER for --insert-placeholder-before"
+        )
+    name, marker = name_and_marker.split("::", 1)
+    text = "" if value is None else str(value).strip()
+    token = template_token(name, quoted=True)
+    if not text:
+        return token
+    if token in text:
+        return text
+    if marker and marker in text:
+        return text.replace(marker, f"{token}, {marker}", 1)
+    return text_with_appended_placeholder(text, name)
+
+
+def apply_workflow_overrides(
+    workflow: dict[str, Any],
+    *,
+    set_values: list[str],
+    placeholders: list[str],
+    append_placeholders: list[str],
+    prepend_placeholders: list[str],
+    insert_placeholders_before: list[str],
+) -> None:
+    for item in set_values:
+        node_id, input_name, replacement = parse_path_value(item)
+        node = workflow.get(node_id)
+        if not node:
+            raise KeyError(f"Workflow has no node {node_id}")
+        node.setdefault("inputs", {})[input_name] = coerce_value(replacement)
+
+    for item in placeholders:
+        node_id, input_name, name = parse_path_value(item)
+        node = workflow.get(node_id)
+        if not node:
+            raise KeyError(f"Workflow has no node {node_id}")
+        node.setdefault("inputs", {})[input_name] = template_token(name)
+
+    for item in append_placeholders:
+        node_id, input_name, name = parse_path_value(item)
+        node = workflow.get(node_id)
+        if not node:
+            raise KeyError(f"Workflow has no node {node_id}")
+        inputs = node.setdefault("inputs", {})
+        inputs[input_name] = text_with_appended_placeholder(inputs.get(input_name), name)
+
+    for item in prepend_placeholders:
+        node_id, input_name, name = parse_path_value(item)
+        node = workflow.get(node_id)
+        if not node:
+            raise KeyError(f"Workflow has no node {node_id}")
+        inputs = node.setdefault("inputs", {})
+        inputs[input_name] = text_with_prepended_placeholder(inputs.get(input_name), name)
+
+    for item in insert_placeholders_before:
+        node_id, input_name, name_and_marker = parse_path_value(item)
+        node = workflow.get(node_id)
+        if not node:
+            raise KeyError(f"Workflow has no node {node_id}")
+        inputs = node.setdefault("inputs", {})
+        inputs[input_name] = text_with_placeholder_before(
+            inputs.get(input_name),
+            name_and_marker,
+        )
+
+
+def st_workflow(args: argparse.Namespace) -> None:
+    source = Path(args.workflow)
+    payload = load_json(source)
+    if is_api_workflow(payload):
+        workflow = payload
+    elif is_ui_workflow(payload):
+        try:
+            object_info = fetch_object_info(args.comfy_url)
+        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                "UI-format workflows need a running ComfyUI server so node widget "
+                f"metadata can be read from {args.comfy_url}/object_info: {exc}"
+            ) from exc
+        workflow = ui_workflow_to_api(payload, object_info)
+    else:
+        raise ValueError(f"{source} is neither ComfyUI UI workflow JSON nor API workflow JSON")
+
+    apply_workflow_overrides(
+        workflow,
+        set_values=args.set,
+        placeholders=args.placeholder,
+        append_placeholders=args.append_placeholder,
+        prepend_placeholders=args.prepend_placeholder,
+        insert_placeholders_before=args.insert_placeholder_before,
+    )
+
+    name = args.name or f"{source.stem}_sillytavern_api"
+    output_dir = Path(args.output_dir)
+    output = output_dir / (name if name.lower().endswith(".json") else f"{name}.json")
+    write_json(output, workflow)
+    echo(f"Wrote SillyTavern ComfyUI API workflow: {output}")
+
+
 def serve(args: argparse.Namespace) -> None:
     comfy_home = Path(args.comfy_home)
     python = venv_python(comfy_home)
@@ -352,6 +711,54 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--torch", choices=("nvidia", "cpu", "skip"), default=os.environ.get("COMFYUI_TORCH", "nvidia"))
     p.add_argument("--torch-index-url", default=DEFAULT_TORCH_INDEX)
     p.set_defaults(func=update)
+
+    p = sub.add_parser("st-workflow")
+    p.add_argument("workflow", help="ComfyUI UI-format or API-format workflow JSON")
+    p.add_argument("--name", default="", help="Output filename or stem. Defaults to <input>_sillytavern_api.json")
+    p.add_argument("--output-dir", default=str(SILLYTAVERN_WORKFLOW_DIR))
+    p.add_argument("--comfy-url", default=os.environ.get("COMFYUI_URL", f"http://127.0.0.1:{DEFAULT_COMFYUI_PORT}"))
+    p.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="NODE.INPUT=VALUE",
+        help="Set an API node input. VALUE is JSON-decoded when possible, otherwise kept as text.",
+    )
+    p.add_argument(
+        "--placeholder",
+        action="append",
+        default=[],
+        metavar="NODE.INPUT=NAME",
+        help="Set an API node input to a SillyTavern placeholder, e.g. 6.text=prompt -> %%prompt%%.",
+    )
+    p.add_argument(
+        "--append-placeholder",
+        action="append",
+        default=[],
+        metavar="NODE.INPUT=NAME",
+        help="Append a SillyTavern placeholder to an existing text input.",
+    )
+    p.add_argument(
+        "--prepend-placeholder",
+        action="append",
+        default=[],
+        metavar="NODE.INPUT=NAME",
+        help="Prepend a SillyTavern placeholder to an existing text input.",
+    )
+    p.add_argument(
+        "--insert-placeholder-before",
+        action="append",
+        default=[],
+        metavar="NODE.INPUT=NAME::MARKER",
+        help="Insert a placeholder before MARKER inside an existing text input.",
+    )
+    p.set_defaults(func=st_workflow)
+
+    p = sub.add_parser("prompt-logs")
+    p.add_argument("--file", default=str(REPO_ROOT / "logs" / "comfyui.prompts.jsonl"))
+    p.add_argument("--lines", type=int, default=20)
+    p.add_argument("--follow", action=argparse.BooleanOptionalAction, default=True)
+    p.set_defaults(func=prompt_logs)
 
     p = sub.add_parser("serve")
     add_common_args(p)

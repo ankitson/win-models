@@ -3,6 +3,7 @@
 *.tmp
 results/
 logs/
+outputs/
 .venv/
 __pycache__/
 *.pyc
