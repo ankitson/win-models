@@ -26,6 +26,7 @@ just comfy serve-tailscale # bind localhost and the Tailscale IPv4
 just comfy status         # show checkout/venv/port state
 just comfy stop           # stop the process listening on COMFYUI_PORT
 just comfy logs           # tail running ComfyUI logs
+just comfy prompt-logs    # tail raw received prompt JSONL
 ```
 
 The setup path follows ComfyUI's manual install flow: clone the upstream repo,
@@ -79,6 +80,9 @@ The CLI also accepts `--input-dir`, `--output-dir`, `--temp-dir`, and
 - `just comfy serve` runs in the foreground. Use Ctrl+C for normal shutdown.
 - `just comfy serve-tailscale` resolves `tailscale ip -4` and passes
   `--listen 127.0.0.1,<tailscale-ip>` to ComfyUI.
+- Prompt logging is enabled by default through a repo-managed custom node. Raw
+  `/prompt` payloads are appended to `logs\comfyui.prompts.jsonl`; disable it
+  with `COMFYUI_LOG_PROMPTS=0` or `win-models comfy serve --no-log-prompts`.
 - `just comfy stop` only kills the process that owns `COMFYUI_PORT`; it does not
   blindly kill every Python process.
 - Use `COMFYUI_TORCH=skip` when the venv already has the desired PyTorch build.

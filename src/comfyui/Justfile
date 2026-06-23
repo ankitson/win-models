@@ -9,6 +9,7 @@ python := env_var_or_default("COMFYUI_PYTHON", "3.13")
 torch := env_var_or_default("COMFYUI_TORCH", "nvidia")
 torch_index_url := env_var_or_default("COMFYUI_TORCH_INDEX_URL", "https://download.pytorch.org/whl/cu130")
 log_dir := env_var_or_default("COMFYUI_LOG_DIR", root / "logs")
+prompt_log_file := env_var_or_default("COMFYUI_PROMPT_LOG_FILE", log_dir / "comfyui.prompts.jsonl")
 
 default:
     @just --justfile "{{ module_directory() }}/Justfile" --working-directory "{{ module_directory() }}" --list
@@ -39,3 +40,6 @@ stop:
 
 logs lines="120":
     @Write-Host "Tailing ComfyUI logs from {{ log_dir }}"; Get-Content -Tail {{ lines }} -Wait "{{ log_dir }}/comfyui.err.log", "{{ log_dir }}/comfyui.out.log"
+
+prompt-logs lines="20":
+    @Write-Host "Tailing ComfyUI prompt JSONL log: {{ prompt_log_file }}"; Get-Content -Tail {{ lines }} -Wait "{{ prompt_log_file }}"

@@ -10,6 +10,10 @@ from .config import DEFAULT_COMFYUI_HOME, DEFAULT_COMFYUI_MODEL_ROOT, DEFAULT_CO
 
 
 REPO_URL = "https://github.com/Comfy-Org/ComfyUI.git"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PROMPT_LOGGER_SOURCE = (
+    REPO_ROOT / "src" / "comfyui" / "custom_nodes" / "win_models_prompt_logger.py"
+)
 DEFAULT_TORCH_INDEX = os.environ.get(
     "COMFYUI_TORCH_INDEX_URL", "https://download.pytorch.org/whl/cu130"
 )
@@ -73,6 +77,22 @@ def write_extra_model_paths(comfy_home: Path, model_root: Path) -> Path:
     config.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     echo(f"Wrote {config}")
     return config
+
+
+def install_prompt_logger_node(comfy_home: Path) -> Path:
+    if not PROMPT_LOGGER_SOURCE.exists():
+        raise FileNotFoundError(f"Missing prompt logger source: {PROMPT_LOGGER_SOURCE}")
+    target = comfy_home / "custom_nodes" / "win_models_prompt_logger.py"
+    ensure_dir(target.parent)
+    target.write_text(PROMPT_LOGGER_SOURCE.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    return target
+
+
+def env_truthy(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
 
 
 def pip_install(python: Path, packages: list[str], extra_args: list[str] | None = None) -> None:
@@ -142,6 +162,8 @@ def setup(args: argparse.Namespace) -> None:
     python = venv_python(comfy_home)
     install_dependencies(args, python, comfy_home)
     write_extra_model_paths(comfy_home, model_root)
+    prompt_logger = install_prompt_logger_node(comfy_home)
+    echo(f"Installed prompt logger custom node: {prompt_logger}")
     ensure_runtime_dirs(args)
     echo("\nDone. Launch with: just comfy serve")
 
@@ -152,6 +174,8 @@ def update(args: argparse.Namespace) -> None:
     ensure_comfy_repo(comfy_home, update=True)
     install_dependencies(args, python, comfy_home)
     write_extra_model_paths(comfy_home, Path(args.model_root))
+    prompt_logger = install_prompt_logger_node(comfy_home)
+    echo(f"Installed prompt logger custom node: {prompt_logger}")
 
 
 def ensure_runtime_dirs(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
@@ -201,6 +225,7 @@ def serve(args: argparse.Namespace) -> None:
     comfy_home = Path(args.comfy_home)
     python = venv_python(comfy_home)
     extra_model_paths = write_extra_model_paths(comfy_home, Path(args.model_root))
+    install_prompt_logger_node(comfy_home)
     user_dir, input_dir, output_dir, temp_dir = ensure_runtime_dirs(args)
 
     if port_owners(args.port):
@@ -236,11 +261,22 @@ def serve(args: argparse.Namespace) -> None:
     else:
         command.append("--disable-auto-launch")
 
+    env = os.environ.copy()
+    env["COMFYUI_LOG_PROMPTS"] = "1" if args.log_prompts else "0"
+    if args.prompt_log_file:
+        prompt_log_file = Path(args.prompt_log_file)
+    else:
+        prompt_log_file = REPO_ROOT / "logs" / "comfyui.prompts.jsonl"
+    ensure_dir(prompt_log_file.parent)
+    env["COMFYUI_PROMPT_LOG_FILE"] = str(prompt_log_file)
+
     echo(f"Starting ComfyUI on http://{args.host}:{args.port}")
+    if args.log_prompts:
+        echo(f"Prompt JSONL log: {prompt_log_file}")
     echo("Server output will stream in this terminal. Press Ctrl+C to stop.")
     if args.host == "0.0.0.0":
         echo(f"Open locally at http://localhost:{args.port}")
-    run(command, cwd=comfy_home)
+    run(command, cwd=comfy_home, env=env)
 
 
 def stop(args: argparse.Namespace) -> None:
@@ -293,6 +329,8 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input-dir", default="")
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--temp-dir", default="")
+    parser.add_argument("--log-prompts", action=argparse.BooleanOptionalAction, default=env_truthy("COMFYUI_LOG_PROMPTS", True))
+    parser.add_argument("--prompt-log-file", default=os.environ.get("COMFYUI_PROMPT_LOG_FILE", ""))
 
 
 def build_parser() -> argparse.ArgumentParser:
