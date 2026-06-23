@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
+import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -18,6 +21,9 @@ REPO_URL = "https://github.com/Comfy-Org/ComfyUI.git"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPT_LOGGER_SOURCE = (
     REPO_ROOT / "src" / "comfyui" / "custom_nodes" / "win_models_prompt_logger.py"
+)
+WORKFLOW_TEMPLATES_SOURCE = (
+    REPO_ROOT / "src" / "comfyui" / "custom_nodes" / "win_models_templates"
 )
 DEFAULT_TORCH_INDEX = os.environ.get(
     "COMFYUI_TORCH_INDEX_URL", "https://download.pytorch.org/whl/cu130"
@@ -92,6 +98,70 @@ def install_prompt_logger_node(comfy_home: Path) -> Path:
     ensure_dir(target.parent)
     target.write_text(PROMPT_LOGGER_SOURCE.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
     return target
+
+
+def install_workflow_templates_node(comfy_home: Path) -> Path:
+    if not WORKFLOW_TEMPLATES_SOURCE.exists():
+        raise FileNotFoundError(f"Missing workflow templates source: {WORKFLOW_TEMPLATES_SOURCE}")
+    target = comfy_home / "custom_nodes" / "win_models_templates"
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(WORKFLOW_TEMPLATES_SOURCE, target)
+    return target
+
+
+def tee_process_output(
+    args: list[str | os.PathLike[str]],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    stdout_log: Path,
+    stderr_log: Path,
+) -> None:
+    printable = " ".join(str(a) for a in args)
+    echo(f"> {printable}")
+    ensure_dir(stdout_log.parent)
+    ensure_dir(stderr_log.parent)
+    header = f"\n\n--- ComfyUI started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode("utf-8")
+
+    with stdout_log.open("ab", buffering=0) as out_file, stderr_log.open("ab", buffering=0) as err_file:
+        out_file.write(header)
+        err_file.write(header)
+        process = subprocess.Popen(
+            [str(a) for a in args],
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        def pump(pipe: Any, log_file: Any, stream: Any) -> None:
+            try:
+                while True:
+                    chunk = pipe.read(4096)
+                    if not chunk:
+                        break
+                    log_file.write(chunk)
+                    try:
+                        stream.buffer.write(chunk)
+                        stream.buffer.flush()
+                    except Exception:
+                        stream.write(chunk.decode("utf-8", "replace"))
+                        stream.flush()
+            finally:
+                pipe.close()
+
+        threads = [
+            threading.Thread(target=pump, args=(process.stdout, out_file, sys.stdout), daemon=True),
+            threading.Thread(target=pump, args=(process.stderr, err_file, sys.stderr), daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        return_code = process.wait()
+        for thread in threads:
+            thread.join()
+    if return_code != 0:
+        raise SystemExit(return_code)
 
 
 def env_truthy(name: str, default: bool) -> bool:
@@ -170,6 +240,8 @@ def setup(args: argparse.Namespace) -> None:
     write_extra_model_paths(comfy_home, model_root)
     prompt_logger = install_prompt_logger_node(comfy_home)
     echo(f"Installed prompt logger custom node: {prompt_logger}")
+    templates = install_workflow_templates_node(comfy_home)
+    echo(f"Installed workflow templates custom node: {templates}")
     ensure_runtime_dirs(args)
     echo("\nDone. Launch with: just comfy serve")
 
@@ -182,6 +254,8 @@ def update(args: argparse.Namespace) -> None:
     write_extra_model_paths(comfy_home, Path(args.model_root))
     prompt_logger = install_prompt_logger_node(comfy_home)
     echo(f"Installed prompt logger custom node: {prompt_logger}")
+    templates = install_workflow_templates_node(comfy_home)
+    echo(f"Installed workflow templates custom node: {templates}")
 
 
 def ensure_runtime_dirs(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
@@ -585,6 +659,7 @@ def serve(args: argparse.Namespace) -> None:
     python = venv_python(comfy_home)
     extra_model_paths = write_extra_model_paths(comfy_home, Path(args.model_root))
     install_prompt_logger_node(comfy_home)
+    install_workflow_templates_node(comfy_home)
     user_dir, input_dir, output_dir, temp_dir = ensure_runtime_dirs(args)
 
     if port_owners(args.port):
@@ -611,16 +686,21 @@ def serve(args: argparse.Namespace) -> None:
         "--temp-directory",
         temp_dir,
     ]
+    memory_mode = args.memory_mode
     if args.lowvram:
-        command.append("--lowvram")
+        memory_mode = "lowvram"
     if args.cpu:
-        command.append("--cpu")
+        memory_mode = "cpu"
+    if memory_mode != "auto":
+        command.append(f"--{memory_mode}")
     if args.open:
         command.append("--auto-launch")
     else:
         command.append("--disable-auto-launch")
 
     env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
     env["COMFYUI_LOG_PROMPTS"] = "1" if args.log_prompts else "0"
     if args.prompt_log_file:
         prompt_log_file = Path(args.prompt_log_file)
@@ -628,14 +708,17 @@ def serve(args: argparse.Namespace) -> None:
         prompt_log_file = REPO_ROOT / "logs" / "comfyui.prompts.jsonl"
     ensure_dir(prompt_log_file.parent)
     env["COMFYUI_PROMPT_LOG_FILE"] = str(prompt_log_file)
+    log_dir = Path(args.log_dir) if args.log_dir else REPO_ROOT / "logs"
+    stdout_log = log_dir / "comfyui.out.log"
+    stderr_log = log_dir / "comfyui.err.log"
 
     echo(f"Starting ComfyUI on http://{args.host}:{args.port}")
     if args.log_prompts:
         echo(f"Prompt JSONL log: {prompt_log_file}")
-    echo("Server output will stream in this terminal. Press Ctrl+C to stop.")
-    if args.host == "0.0.0.0":
-        echo(f"Open locally at http://localhost:{args.port}")
-    run(command, cwd=comfy_home, env=env)
+    echo(f"Server stdout log: {stdout_log}")
+    echo(f"Server stderr log: {stderr_log}")
+    echo("Server output will stream in this terminal and tee to logs. Press Ctrl+C to stop.")
+    tee_process_output(command, cwd=comfy_home, env=env, stdout_log=stdout_log, stderr_log=stderr_log)
 
 
 def stop(args: argparse.Namespace) -> None:
@@ -688,8 +771,20 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input-dir", default="")
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--temp-dir", default="")
+    parser.add_argument("--log-dir", default=os.environ.get("COMFYUI_LOG_DIR", ""))
     parser.add_argument("--log-prompts", action=argparse.BooleanOptionalAction, default=env_truthy("COMFYUI_LOG_PROMPTS", True))
     parser.add_argument("--prompt-log-file", default=os.environ.get("COMFYUI_PROMPT_LOG_FILE", ""))
+
+
+def add_memory_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--memory-mode",
+        choices=("auto", "highvram", "gpu-only", "lowvram", "novram", "cpu"),
+        default=os.environ.get("COMFYUI_MEMORY_MODE", "auto"),
+        help="ComfyUI model memory policy. Use highvram to keep models in GPU memory when possible.",
+    )
+    parser.add_argument("--lowvram", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--cpu", action="store_true", help=argparse.SUPPRESS)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -766,33 +861,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default=os.environ.get("COMFYUI_HOST", "127.0.0.1"))
     p.add_argument("--port", type=int, default=DEFAULT_COMFYUI_PORT)
     p.add_argument("--open", action="store_true")
-    p.add_argument("--lan", action="store_true")
-    p.add_argument("--lowvram", action="store_true")
-    p.add_argument("--cpu", action="store_true")
+    add_memory_args(p)
     p.set_defaults(func=serve)
-
-    p = sub.add_parser("serve-lan")
-    add_common_args(p)
-    add_runtime_args(p)
-    p.add_argument("--port", type=int, default=DEFAULT_COMFYUI_PORT)
-    p.add_argument("--open", action="store_true")
-    p.add_argument("--lowvram", action="store_true")
-    p.add_argument("--cpu", action="store_true")
-    p.set_defaults(func=lambda args: serve(argparse.Namespace(**vars(args), host="0.0.0.0", lan=True)))
 
     p = sub.add_parser("serve-tailscale")
     add_common_args(p)
     add_runtime_args(p)
     p.add_argument("--port", type=int, default=DEFAULT_COMFYUI_PORT)
     p.add_argument("--open", action="store_true")
-    p.add_argument("--lowvram", action="store_true")
-    p.add_argument("--cpu", action="store_true")
+    add_memory_args(p)
     p.set_defaults(
         func=lambda args: serve(
             argparse.Namespace(
                 **vars(args),
-                host=f"127.0.0.1,{tailscale_ipv4()}",
-                lan=False,
+                host=tailscale_ipv4(),
             )
         )
     )
@@ -811,6 +893,4 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if getattr(args, "lan", False):
-        args.host = "0.0.0.0"
     args.func(args)

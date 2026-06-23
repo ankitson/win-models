@@ -19,10 +19,8 @@ Defaults:
 ```powershell
 just comfy setup          # clone ComfyUI, create .venv, install torch + requirements
 just comfy update         # git pull and refresh dependencies
-just comfy serve          # foreground server on 127.0.0.1:8188, opens browser
-just comfy serve-no-open  # foreground server without browser auto-open
-just comfy serve-lan      # bind 0.0.0.0 for LAN access
-just comfy serve-tailscale # bind localhost and the current Tailscale IPv4
+just comfy serve          # foreground server on 127.0.0.1:8188
+just comfy serve-tailscale # bind only the current Tailscale IPv4
 just comfy status         # show checkout/venv/port state
 just comfy stop           # stop the process listening on COMFYUI_PORT
 just comfy logs           # tail running ComfyUI logs
@@ -33,6 +31,59 @@ just comfy st-workflow <workflow> # generate SillyTavern API workflow JSON
 The setup path follows ComfyUI's manual install flow: clone the upstream repo,
 use an isolated virtual environment, install PyTorch, install
 `requirements.txt`, and launch with `python main.py`.
+
+## Workflow Templates
+
+The repo ships generic ComfyUI workflow templates through a small custom-node
+package:
+
+```text
+src\comfyui\custom_nodes\win_models_templates\workflows\
+```
+
+These templates are installed into ComfyUI by `setup`, `update`, and `serve`.
+After ComfyUI restarts, they are available through ComfyUI's workflow template
+browser under the `win_models_templates` node pack.
+
+Included templates:
+
+```text
+win_models_text2img.json
+win_models_img2img.json
+win_models_inpaint.json
+win_models_flux2_klein_9b_single_image_edit_lora.json
+win_models_flux2_klein_9b_single_image_edit_lora_main.json
+win_models_flux2_klein_switch_single_image_edit_lora_main.json
+win_models_flux2_klein_switch_text2img_lora_main.json
+```
+
+They are generic UI workflows with:
+
+- `CheckpointLoaderSimple`
+- `MultiLoRAStack`
+- `StringReplace` positive and negative prompt templates
+- fixed text-to-image, img2img, or inpaint latent paths
+- no model-specific checkpoint, embedding, trigger word, URL, or local path
+
+These templates are for checkpoint-style SD/SDXL/Pony workflows. Split-loader
+families such as Flux.2 Klein need their own workflow using separate diffusion
+model, text encoder, and VAE loader nodes; selecting a Flux.2 Klein file in
+`CheckpointLoaderSimple` can fail later with an invalid VAE.
+
+The Flux.2 Klein 9B single-image edit template follows the official ComfyUI
+tutorial workflow shape, trims it to one input image plus edit text, and adds a
+`MultiLoRAStack` between the Flux model/text encoder loaders and the sampler
+conditioning path.
+
+The `_lora_main` variant keeps the Flux diffusion loader, text encoder loader,
+and `MultiLoRAStack` on the main canvas so LoRA rows are easier to inspect and
+edit. The subgraph only contains the image-edit core.
+
+The `switch` variant uses a local `Flux.2 Klein Preset Loader` node. Its preset
+selects the matching diffusion model, text encoder, and VAE for 9B base or 4B
+distilled. The override fields remain editable for exact filename experiments.
+The switch image-edit and text-to-image templates expose both prompt and
+negative prompt fields.
 
 ## Model Paths
 
@@ -102,11 +153,10 @@ ComfyUI. Keep the SillyTavern common prompt prefix/suffix minimal so those
 tokens are not added twice.
 
 SillyTavern only detects placeholders when they are exact JSON string values,
-for example `"text": "%prompt%"`. Do not place `%prompt%` inside a larger prompt
-string such as `"fixed tags, %prompt%, trigger"`. SillyTavern workflows should
-therefore use separate `CLIPTextEncode` nodes for fixed model tags and for the
-SillyTavern placeholder text, then combine them with `ConditioningConcat`
-before `KSampler`.
+for example `"replace": "%prompt%"`. Do not place `%prompt%` inside a larger
+prompt string such as `"fixed tags, %prompt%, trigger"`. Current workflows use a
+`StringReplace` template: fixed prompt text contains an internal marker, and the
+standalone `replace` value is what SillyTavern fills.
 
 ### Workflow Generator
 
@@ -130,5 +180,4 @@ Use `--set NODE.INPUT=VALUE` for exact values. Use
 `--insert-placeholder-before NODE.INPUT=NAME::MARKER` are generic helpers for
 systems that allow placeholders inside larger text strings. SillyTavern's
 ComfyUI workflow editor does not reliably detect that form; for SillyTavern,
-use a separate `CLIPTextEncode` node whose whole `text` value is `%NAME%`, then
-combine it with fixed conditioning using `ConditioningConcat`.
+use a standalone placeholder value in a `StringReplace` node.
