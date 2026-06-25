@@ -32,6 +32,11 @@ The setup path follows ComfyUI's manual install flow: clone the upstream repo,
 use an isolated virtual environment, install PyTorch, install
 `requirements.txt`, and launch with `python main.py`.
 
+Assets are enabled by default. ComfyUI scans `models`, `input`, and `output`
+into its local asset index so generated files can appear in asset-backed UI
+views. Set `COMFYUI_ASSETS=0` or pass `--no-assets` to the underlying
+`win-models comfy serve` command to disable this.
+
 ## Workflow Templates
 
 The repo ships generic ComfyUI workflow templates through a small custom-node

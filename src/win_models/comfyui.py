@@ -693,6 +693,8 @@ def serve(args: argparse.Namespace) -> None:
         memory_mode = "cpu"
     if memory_mode != "auto":
         command.append(f"--{memory_mode}")
+    if args.assets:
+        command.append("--enable-assets")
     if args.open:
         command.append("--auto-launch")
     else:
@@ -774,6 +776,7 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--log-dir", default=os.environ.get("COMFYUI_LOG_DIR", ""))
     parser.add_argument("--log-prompts", action=argparse.BooleanOptionalAction, default=env_truthy("COMFYUI_LOG_PROMPTS", True))
     parser.add_argument("--prompt-log-file", default=os.environ.get("COMFYUI_PROMPT_LOG_FILE", ""))
+    parser.add_argument("--assets", action=argparse.BooleanOptionalAction, default=env_truthy("COMFYUI_ASSETS", True))
 
 
 def add_memory_args(parser: argparse.ArgumentParser) -> None:
