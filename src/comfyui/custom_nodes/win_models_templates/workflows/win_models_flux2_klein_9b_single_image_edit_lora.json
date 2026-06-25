@@ -806,7 +806,7 @@
               "secondTabWidth": 65,
               "models": [
                 {
-                "name": "flux2Klein_9b.safetensors",
+                  "name": "flux2Klein_9b.safetensors",
                   "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9b-fp8/resolve/main/flux-2-klein-base-9b-fp8.safetensors",
                   "directory": "diffusion_models"
                 }
@@ -818,7 +818,7 @@
               }
             },
             "widgets_values": [
-            "flux2Klein_9b.safetensors",
+              "flux2Klein_9b.safetensors",
               "default"
             ]
           },
@@ -1505,7 +1505,7 @@
             "properties": {
               "Node name for S&R": "MultiLoRAStack",
               "cnr_id": "multi-lora-stack",
-              "ver": "pr-5",
+              "ver": "0.0.0",
               "enableTabs": false,
               "tabWidth": 65,
               "tabXOffset": 10,

@@ -267,7 +267,7 @@
       "properties": {
         "Node name for S&R": "MultiLoRAStack",
         "cnr_id": "multi-lora-stack",
-        "ver": "pr-5",
+        "ver": "0.0.0",
         "enableTabs": false,
         "tabWidth": 65,
         "tabXOffset": 10,
