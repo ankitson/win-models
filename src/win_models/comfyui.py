@@ -43,6 +43,14 @@ MODEL_SUBDIRS = (
     "upscale_models",
     "vae",
 )
+# Folders whose ComfyUI key differs from its on-disk subdir (nested paths).
+# Impact Pack/Subpack look up detector models under these keys.
+NESTED_MODEL_DIRS = {
+    "ultralytics": "ultralytics",
+    "ultralytics_bbox": "ultralytics/bbox",
+    "ultralytics_segm": "ultralytics/segm",
+    "sams": "sams",
+}
 SILLYTAVERN_WORKFLOW_DIR = REPO_ROOT / "outputs"
 
 
@@ -76,6 +84,8 @@ def write_extra_model_paths(comfy_home: Path, model_root: Path) -> Path:
     ensure_dir(model_root)
     for subdir in MODEL_SUBDIRS:
         ensure_dir(model_root / subdir)
+    for rel in NESTED_MODEL_DIRS.values():
+        ensure_dir(model_root / rel)
 
     config = comfy_home / "extra_model_paths.yaml"
     lines = [
@@ -86,6 +96,8 @@ def write_extra_model_paths(comfy_home: Path, model_root: Path) -> Path:
     ]
     for subdir in MODEL_SUBDIRS:
         lines.append(f"    {subdir}: {subdir}")
+    for key, rel in NESTED_MODEL_DIRS.items():
+        lines.append(f"    {key}: {rel}")
     config.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     echo(f"Wrote {config}")
     return config

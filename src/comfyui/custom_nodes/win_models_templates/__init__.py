@@ -89,7 +89,7 @@ class ImageContactSheet:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "layout": (["row", "column", "grid"],),
+                "layout": (["grid", "row", "column"],),
                 "columns": ("INT", {"default": 3, "min": 1, "max": 12}),
                 "match_image_size": ("BOOLEAN", {"default": True}),
                 "spacing_width": ("INT", {"default": 0, "min": 0, "max": 1024, "step": 2}),
@@ -104,8 +104,8 @@ class ImageContactSheet:
     FUNCTION = "stitch"
     CATEGORY = "image/transform"
     DESCRIPTION = (
-        "Stitch any connected images into a row, column, or grid. "
-        "Batched IMAGE inputs are expanded into individual tiles."
+        "Stitch connected image inputs into a contact sheet. "
+        "Each connected input contributes one tile."
     )
 
     @staticmethod
@@ -207,8 +207,12 @@ class ImageContactSheet:
         spacing_color: str,
         **kwargs,
     ):
-        images = [kwargs[key] for key in sorted(kwargs) if kwargs[key] is not None]
-        tiles = [image[index : index + 1] for image in images for index in range(image.shape[0])]
+        images = [
+            kwargs[f"image{index}"]
+            for index in range(1, 13)
+            if kwargs.get(f"image{index}") is not None
+        ]
+        tiles = [image[:1] for image in images]
         if not tiles:
             raise ValueError("At least one image input is required.")
 
@@ -225,8 +229,8 @@ class ImageContactSheet:
             tiles = [self._pad_to(tile, tile_w, tile_h, color) for tile in tiles]
 
         if layout == "row":
-            row_count = 1
-            column_count = len(tiles)
+            column_count = max(1, min(columns, len(tiles)))
+            row_count = math.ceil(len(tiles) / column_count)
         elif layout == "column":
             row_count = len(tiles)
             column_count = 1
