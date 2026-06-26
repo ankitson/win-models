@@ -39,6 +39,7 @@ ComfyUI:
 just comfy setup
 just comfy serve
 just comfy serve-tailscale
+just comfy logs
 ```
 
 Download the new Gemma 26B variants into the Hugging Face cache layout used by
@@ -116,5 +117,7 @@ Defaults can be overridden with environment variables:
 - `COMFYUI_HOST`, default `127.0.0.1`
 - `COMFYUI_PORT`, default `8188`
 
-Server recipes run in the foreground so logs and failures are visible in the
-terminal. Use Ctrl+C to stop normal foreground servers.
+ComfyUI serve recipes start in the background and write process output to
+`logs\comfyui.out.log` and `logs\comfyui.err.log`; use `just comfy logs` to
+follow them and `just comfy stop` to stop the server. Other server recipes run
+in the foreground so logs and failures are visible in the terminal.

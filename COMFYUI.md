@@ -19,8 +19,8 @@ Defaults:
 ```powershell
 just comfy setup          # clone ComfyUI, create .venv, install torch + requirements
 just comfy update         # git pull and refresh dependencies
-just comfy serve          # foreground server on 127.0.0.1:8188
-just comfy serve-tailscale # bind only the current Tailscale IPv4
+just comfy serve          # background server on 127.0.0.1:8188
+just comfy serve-tailscale # background server bound to the current Tailscale IPv4
 just comfy status         # show checkout/venv/port state
 just comfy stop           # stop the process listening on COMFYUI_PORT
 just comfy logs           # tail running ComfyUI logs
@@ -92,7 +92,7 @@ negative prompt fields.
 
 ## Model Paths
 
-`just comfy setup` and `just comfy serve` write:
+`just comfy setup`, `just comfy update`, and `just comfy serve` write:
 
 ```text
 E:\root\projects\comfyui\extra_model_paths.yaml
@@ -134,7 +134,9 @@ The CLI also accepts `--input-dir`, `--output-dir`, `--temp-dir`, and
 
 ## Notes
 
-- `just comfy serve` runs in the foreground. Use Ctrl+C for normal shutdown.
+- `just comfy serve` and `just comfy serve-tailscale` start ComfyUI in the
+  background. Server output is written to `logs\comfyui.out.log` and
+  `logs\comfyui.err.log`; use `just comfy logs` to follow it.
 - Prompt logging is enabled by default through a repo-managed custom node. Raw
   `/prompt` payloads are appended to `logs\comfyui.prompts.jsonl`; disable it
   with `COMFYUI_LOG_PROMPTS=0` or `win-models comfy serve --no-log-prompts`.

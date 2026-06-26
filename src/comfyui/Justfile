@@ -19,11 +19,11 @@ setup:
 update:
     @uv --project "{{ root }}" run win-models comfy update --comfy-home "{{ comfy_home }}" --model-root "{{ model_root }}" --torch "{{ torch }}" --torch-index-url "{{ torch_index_url }}"
 
-serve background="false" memory="auto":
-    @if ("{{ background }}".ToLowerInvariant() -in @("1", "true", "yes", "bg", "background")) { Start-Process powershell.exe -WindowStyle Hidden -WorkingDirectory "{{ root }}" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Set-Location -LiteralPath '{{ root }}'; just comfy serve false '{{ memory }}'") } else { uv --project "{{ root }}" run win-models comfy serve --comfy-home "{{ comfy_home }}" --model-root "{{ model_root }}" --host "127.0.0.1" --port {{ port }} --log-dir "{{ log_dir }}" --memory-mode "{{ memory }}" }
+serve memory="auto":
+    @Start-Process powershell.exe -WindowStyle Hidden -WorkingDirectory "{{ root }}" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "uv --project '{{ root }}' run win-models comfy serve --comfy-home '{{ comfy_home }}' --model-root '{{ model_root }}' --host '127.0.0.1' --port {{ port }} --log-dir '{{ log_dir }}' --memory-mode '{{ memory }}'")
 
-serve-tailscale background="false" memory="auto":
-    @if ("{{ background }}".ToLowerInvariant() -in @("1", "true", "yes", "bg", "background")) { Start-Process powershell.exe -WindowStyle Hidden -WorkingDirectory "{{ root }}" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Set-Location -LiteralPath '{{ root }}'; just comfy serve-tailscale false '{{ memory }}'") } else { uv --project "{{ root }}" run win-models comfy serve-tailscale --comfy-home "{{ comfy_home }}" --model-root "{{ model_root }}" --port {{ port }} --log-dir "{{ log_dir }}" --memory-mode "{{ memory }}" }
+serve-tailscale memory="auto":
+    @Start-Process powershell.exe -WindowStyle Hidden -WorkingDirectory "{{ root }}" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "uv --project '{{ root }}' run win-models comfy serve-tailscale --comfy-home '{{ comfy_home }}' --model-root '{{ model_root }}' --port {{ port }} --log-dir '{{ log_dir }}' --memory-mode '{{ memory }}'")
 
 status:
     @uv --project "{{ root }}" run win-models comfy status --comfy-home "{{ comfy_home }}" --model-root "{{ model_root }}" --port {{ port }}

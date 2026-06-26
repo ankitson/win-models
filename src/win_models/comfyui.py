@@ -135,25 +135,19 @@ def tee_process_output(
             stderr=subprocess.PIPE,
         )
 
-        def pump(pipe: Any, log_file: Any, stream: Any) -> None:
+        def pump(pipe: Any, log_file: Any) -> None:
             try:
                 while True:
                     chunk = pipe.read(4096)
                     if not chunk:
                         break
                     log_file.write(chunk)
-                    try:
-                        stream.buffer.write(chunk)
-                        stream.buffer.flush()
-                    except Exception:
-                        stream.write(chunk.decode("utf-8", "replace"))
-                        stream.flush()
             finally:
                 pipe.close()
 
         threads = [
-            threading.Thread(target=pump, args=(process.stdout, out_file, sys.stdout), daemon=True),
-            threading.Thread(target=pump, args=(process.stderr, err_file, sys.stderr), daemon=True),
+            threading.Thread(target=pump, args=(process.stdout, out_file), daemon=True),
+            threading.Thread(target=pump, args=(process.stderr, err_file), daemon=True),
         ]
         for thread in threads:
             thread.start()
@@ -719,7 +713,7 @@ def serve(args: argparse.Namespace) -> None:
         echo(f"Prompt JSONL log: {prompt_log_file}")
     echo(f"Server stdout log: {stdout_log}")
     echo(f"Server stderr log: {stderr_log}")
-    echo("Server output will stream in this terminal and tee to logs. Press Ctrl+C to stop.")
+    echo("Server output will tee to logs only. Use `just comfy logs` to follow logs.")
     tee_process_output(command, cwd=comfy_home, env=env, stdout_log=stdout_log, stderr_log=stderr_log)
 
 
