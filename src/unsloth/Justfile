@@ -4,7 +4,7 @@ root := module_directory() / "../.."
 model_root := env_var_or_default("WIN_MODELS_MODEL_ROOT", "E:\\root\\projects\\models")
 hf_cache := env_var_or_default("UNSLOTH_HF_CACHE", model_root)
 
-default_model := env_var_or_default("UNSLOTH_DEFAULT_MODEL", "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q8_K_XL")
+default_model := env_var_or_default("UNSLOTH_DEFAULT_MODEL", "unsloth/gemma-4-26B-A4B-it-qat-GGUF:UD-Q4_K_XL")
 
 context_length := env_var_or_default("UNSLOTH_CONTEXT_LENGTH", "262144")
 parallel := env_var_or_default("UNSLOTH_PARALLEL", "1")
