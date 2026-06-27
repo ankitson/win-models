@@ -16,6 +16,7 @@ from .config import DEFAULT_MODEL_ROOT, DEFAULT_STUDIO_HOME, DEFAULT_STUDIO_PORT
 LOCAL_ZIP_MARKER = "UNSLOTH_LOCAL_ZIP_SHIM"
 CHAT_TEMPLATE_OVERRIDE_SHIM_MARKER = "UNSLOTH_CHAT_TEMPLATE_OVERRIDE_SHIM"
 CLI_API_KEY_REUSE_SHIM_MARKER = "UNSLOTH_CLI_API_KEY_REUSE_SHIM"
+OPENAI_REASONING_PASSTHROUGH_SHIM_MARKER = "UNSLOTH_OPENAI_REASONING_PASSTHROUGH_SHIM"
 DEFAULT_MCP_CONFIG = (
     Path(__file__).resolve().parents[1] / "unsloth" / "mcp-servers.json"
 )
@@ -308,6 +309,192 @@ def apply_cli_api_key_reuse_shim(studio_home: Path) -> None:
     echo("  applied CLI API-key reuse shim to unsloth_cli.commands.studio")
 
 
+def apply_openai_reasoning_passthrough_shim(studio_home: Path) -> None:
+    target = studio_package_dir(studio_home) / "backend" / "routes" / "inference.py"
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if OPENAI_REASONING_PASSTHROUGH_SHIM_MARKER in text:
+        echo("  OpenAI reasoning passthrough shim already present")
+        return
+
+    helper_anchor = '''def _chat_content_chunk(completion_id, created, model_name, text) -> str:
+    """A content-delta chunk carrying ``text``."""
+    return _chat_chunk_sse(
+        completion_id,
+        created,
+        model_name,
+        delta = ChoiceDelta(content = text),
+        finish_reason = None,
+    )
+
+
+def _chat_final_chunk(completion_id, created, model_name, finish_reason) -> str:
+'''
+    helper_replacement = '''def _chat_content_chunk(completion_id, created, model_name, text) -> str:
+    """A content-delta chunk carrying ``text``."""
+    return _chat_chunk_sse(
+        completion_id,
+        created,
+        model_name,
+        delta = ChoiceDelta(content = text),
+        finish_reason = None,
+    )
+
+
+def _split_reasoning_tags_for_openai(text: str) -> tuple[str, str]:
+    # UNSLOTH_OPENAI_REASONING_PASSTHROUGH_SHIM: Studio wraps llama.cpp
+    # reasoning_content as <think>...</think> for its UI. Split it back into
+    # OpenAI-compatible content/reasoning streams at the API boundary.
+    start_tag = "<think>"
+    end_tag = "</think>"
+    start = text.find(start_tag)
+    if start < 0:
+        return text, ""
+    before = text[:start]
+    body_start = start + len(start_tag)
+    end = text.find(end_tag, body_start)
+    if end < 0:
+        return before, text[body_start:]
+    return before + text[end + len(end_tag) :], text[body_start:end]
+
+
+def _chat_reasoning_chunk(completion_id, created, model_name, text) -> str:
+    obj = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model_name,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"reasoning_content": text},
+                "finish_reason": None,
+            }
+        ],
+    }
+    return "data: " + json.dumps(obj, separators = (",", ":")) + "\\n\\n"
+
+
+def _chat_final_chunk(completion_id, created, model_name, finish_reason) -> str:
+'''
+    if helper_anchor not in text:
+        raise RuntimeError(f"Could not find _chat_content_chunk anchor in {target}; Studio changed.")
+    text = text.replace(helper_anchor, helper_replacement, 1)
+
+    replacements = [
+        (
+            '                    prev_text = ""\n'
+            '                    _stream_usage = None\n',
+            '                    prev_text = ""\n'
+            '                    prev_reasoning_text = ""\n'
+            '                    _stream_usage = None\n',
+            "GGUF tool stream state",
+        ),
+        (
+            '                            if not event["text"]:\n'
+            '                                prev_text = ""\n',
+            '                            if not event["text"]:\n'
+            '                                prev_text = ""\n'
+            '                                prev_reasoning_text = ""\n',
+            "GGUF tool status reset",
+        ),
+        (
+            '                            if event["type"] == "tool_start":\n'
+            '                                prev_text = ""\n',
+            '                            if event["type"] == "tool_start":\n'
+            '                                prev_text = ""\n'
+            '                                prev_reasoning_text = ""\n',
+            "GGUF tool_start reset",
+        ),
+        (
+            '                        new_text = clean_cumulative[len(prev_text) :]\n'
+            '                        prev_text = clean_cumulative\n'
+            '                        if not new_text:\n'
+            '                            continue\n'
+            '                        api_monitor.append_reply(monitor_id, new_text)\n'
+            '                        yield _chat_content_chunk(completion_id, created, model_name, new_text)\n',
+            '                        content_cumulative, reasoning_cumulative = _split_reasoning_tags_for_openai(\n'
+            '                            clean_cumulative\n'
+            '                        )\n'
+            '                        new_reasoning = reasoning_cumulative[len(prev_reasoning_text) :]\n'
+            '                        prev_reasoning_text = reasoning_cumulative\n'
+            '                        if new_reasoning:\n'
+            '                            yield _chat_reasoning_chunk(\n'
+            '                                completion_id, created, model_name, new_reasoning\n'
+            '                            )\n'
+            '                        new_text = content_cumulative[len(prev_text) :]\n'
+            '                        prev_text = content_cumulative\n'
+            '                        if not new_text:\n'
+            '                            continue\n'
+            '                        api_monitor.append_reply(monitor_id, new_text)\n'
+            '                        yield _chat_content_chunk(completion_id, created, model_name, new_text)\n',
+            "GGUF tool content split",
+        ),
+        (
+            '                    prev_text = ""\n'
+            '                    _stream_usage = None\n',
+            '                    prev_text = ""\n'
+            '                    prev_reasoning_text = ""\n'
+            '                    _stream_usage = None\n',
+            "GGUF stream state",
+        ),
+        (
+            '                        new_text = cumulative[len(prev_text) :]\n'
+            '                        prev_text = cumulative\n'
+            '                        if not new_text:\n'
+            '                            continue\n'
+            '                        api_monitor.append_reply(monitor_id, new_text)\n'
+            '                        yield _chat_content_chunk(completion_id, created, model_name, new_text)\n',
+            '                        content_cumulative, reasoning_cumulative = _split_reasoning_tags_for_openai(\n'
+            '                            cumulative\n'
+            '                        )\n'
+            '                        new_reasoning = reasoning_cumulative[len(prev_reasoning_text) :]\n'
+            '                        prev_reasoning_text = reasoning_cumulative\n'
+            '                        if new_reasoning:\n'
+            '                            yield _chat_reasoning_chunk(\n'
+            '                                completion_id, created, model_name, new_reasoning\n'
+            '                            )\n'
+            '                        new_text = content_cumulative[len(prev_text) :]\n'
+            '                        prev_text = content_cumulative\n'
+            '                        if not new_text:\n'
+            '                            continue\n'
+            '                        api_monitor.append_reply(monitor_id, new_text)\n'
+            '                        yield _chat_content_chunk(completion_id, created, model_name, new_text)\n',
+            "GGUF stream content split",
+        ),
+        (
+            '                        full_text = token\n'
+            '\n'
+            '                    _choices.append(\n',
+            '                        full_text = token\n'
+            '\n'
+            '                    full_text, _reasoning_text = _split_reasoning_tags_for_openai(full_text)\n'
+            '                    _choices.append(\n',
+            "GGUF non-stream content split",
+        ),
+        (
+            '                        full_text = _strip_tool_xml_for_display(\n'
+            '                            event.get("text", ""),\n'
+            '                            auto_heal_tool_calls = _sf_auto_heal_tool_calls,\n'
+            '                        )\n',
+            '                        full_text = _strip_tool_xml_for_display(\n'
+            '                            event.get("text", ""),\n'
+            '                            auto_heal_tool_calls = _sf_auto_heal_tool_calls,\n'
+            '                        )\n'
+            '                        full_text, _reasoning_text = _split_reasoning_tags_for_openai(full_text)\n',
+            "tool non-stream content split",
+        ),
+    ]
+    for old, new, label in replacements:
+        if old not in text:
+            raise RuntimeError(f"Could not find {label} anchor in {target}; Studio changed.")
+        text = text.replace(old, new, 1)
+
+    target.write_text(text, encoding="utf-8", newline="\n")
+    echo("  applied OpenAI reasoning passthrough shim to backend.routes.inference")
+
+
 def find_llama_zips(zip_dir: Path, release_tag: str, runtime: str) -> tuple[Path, Path]:
     bin_name = f"llama-{release_tag}-bin-win-cuda-{runtime}-x64.zip"
     cudart_name = f"cudart-llama-bin-win-cuda-{runtime}-x64.zip"
@@ -550,6 +737,7 @@ def setup(args: argparse.Namespace) -> None:
     apply_llama_local_zip_shim(studio_home)
     apply_chat_template_override_shim(studio_home)
     apply_cli_api_key_reuse_shim(studio_home)
+    apply_openai_reasoning_passthrough_shim(studio_home)
 
     echo(f"\n[2/6] Locating prebuilt zips in {zip_dir} ...")
     bin_zip, cudart_zip = find_llama_zips(zip_dir, args.release_tag, args.runtime)
@@ -580,7 +768,6 @@ def setup(args: argparse.Namespace) -> None:
             "ggml-org/llama.cpp",
             "--published-release-tag",
             args.release_tag,
-            "--simple-policy",
         ],
         env=env,
     )
@@ -595,6 +782,7 @@ def setup(args: argparse.Namespace) -> None:
     run([unsloth, "studio", "setup", "--verbose"], env=env)
     apply_chat_template_override_shim(studio_home)
     apply_cli_api_key_reuse_shim(studio_home)
+    apply_openai_reasoning_passthrough_shim(studio_home)
 
     if args.register_model_root:
         echo(f"\n[5/6] Registering model folder {model_root} as a Studio scan folder...")
@@ -615,6 +803,7 @@ def serve(args: argparse.Namespace) -> None:
     unsloth = resolve_unsloth_exe(studio_home)
     apply_chat_template_override_shim(studio_home)
     apply_cli_api_key_reuse_shim(studio_home)
+    apply_openai_reasoning_passthrough_shim(studio_home)
     if args.parallel < 1:
         raise ValueError("--parallel must be at least 1")
     bind_host = "0.0.0.0" if args.lan else args.host
@@ -678,6 +867,8 @@ def serve(args: argparse.Namespace) -> None:
                 args.cache_type_kv,
             ]
         )
+    if args.reasoning_format:
+        command.extend(["--reasoning-format", args.reasoning_format])
     if args.enable_tools:
         command.append("--enable-tools")
     else:
@@ -691,6 +882,8 @@ def serve(args: argparse.Namespace) -> None:
         echo(f"llama-server context override: -c {args.max_seq_length}")
     if args.cache_type_kv:
         echo(f"llama-server KV cache override: --cache-type-k {args.cache_type_kv} --cache-type-v {args.cache_type_kv}")
+    if args.reasoning_format:
+        echo(f"llama-server reasoning parser: --reasoning-format {args.reasoning_format}")
     if args.chat_template_file:
         echo(f"Studio chat template override: {Path(args.chat_template_file).resolve()}")
     echo("Backend output will stream in this terminal. Press Ctrl+C to stop.")
@@ -754,7 +947,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--studio-home", default=str(DEFAULT_STUDIO_HOME))
     p.add_argument("--model-root", default=str(DEFAULT_MODEL_ROOT))
     p.add_argument("--zip-dir", default=str(Path.home() / "Downloads"))
-    p.add_argument("--release-tag", default="b9536")
+    p.add_argument("--release-tag", default="b9821")
     p.add_argument("--runtime", default="13.3")
     p.add_argument("--skip-base", action="store_true")
     p.add_argument("--register-model-root", action="store_true")
@@ -774,6 +967,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-seq-length", type=int, required=True)
     p.add_argument("--parallel", type=int, default=1)
     p.add_argument("--cache-type-kv", default="q8_0")
+    p.add_argument("--reasoning-format", choices=("none", "deepseek", "deepseek-legacy"), default="deepseek")
     p.add_argument("--chat-template-file", default="")
     p.add_argument("--port", type=int, default=DEFAULT_STUDIO_PORT)
     p.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")

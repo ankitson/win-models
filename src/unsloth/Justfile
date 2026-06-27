@@ -6,9 +6,10 @@ hf_cache := env_var_or_default("UNSLOTH_HF_CACHE", model_root)
 
 default_model := env_var_or_default("UNSLOTH_DEFAULT_MODEL", "unsloth/gemma-4-26B-A4B-it-qat-GGUF:UD-Q4_K_XL")
 
-context_length := env_var_or_default("UNSLOTH_CONTEXT_LENGTH", "262144")
+context_length := env_var_or_default("UNSLOTH_CONTEXT_LENGTH", "131072")
 parallel := env_var_or_default("UNSLOTH_PARALLEL", "1")
 cache_type_kv := env_var_or_default("UNSLOTH_CACHE_TYPE_KV", "q8_0")
+reasoning_format := env_var_or_default("UNSLOTH_REASONING_FORMAT", "deepseek")
 chat_template_file := env_var_or_default("UNSLOTH_CHAT_TEMPLATE_FILE", root / "src/unsloth/chat-templates/gemma-4-31b-it-pr118.jinja")
 studio_home := env_var_or_default("UNSLOTH_STUDIO_HOME", "E:\\root\\projects\\unsloth")
 studio_port := env_var_or_default("WIN_MODELS_STUDIO_PORT", "8888")
@@ -24,15 +25,15 @@ sync-mcp:
 
 serve port=studio_port:
     @uv --project "{{ root }}" run win-models unsloth sync-mcp --studio-home "{{ studio_home }}"
-    @uv --project "{{ root }}" run win-models unsloth serve --studio-home "{{ studio_home }}" --hf-cache-dir "{{ hf_cache }}" --model "{{ default_model }}" --max-seq-length {{ context_length }} --parallel {{ parallel }} --cache-type-kv "{{ cache_type_kv }}" {{ if chat_template_file == "" { "" } else { "--chat-template-file " + quote(chat_template_file) } }} --port {{ port }} --open
+    @uv --project "{{ root }}" run win-models unsloth serve --studio-home "{{ studio_home }}" --hf-cache-dir "{{ hf_cache }}" --model "{{ default_model }}" --max-seq-length {{ context_length }} --parallel {{ parallel }} --cache-type-kv "{{ cache_type_kv }}" --reasoning-format "{{ reasoning_format }}" {{ if chat_template_file == "" { "" } else { "--chat-template-file " + quote(chat_template_file) } }} --port {{ port }} --open
 
 serve-lan port=studio_port:
     @uv --project "{{ root }}" run win-models unsloth sync-mcp --studio-home "{{ studio_home }}"
-    @uv --project "{{ root }}" run win-models unsloth serve --studio-home "{{ studio_home }}" --hf-cache-dir "{{ hf_cache }}" --model "{{ default_model }}" --max-seq-length {{ context_length }} --parallel {{ parallel }} --cache-type-kv "{{ cache_type_kv }}" {{ if chat_template_file == "" { "" } else { "--chat-template-file " + quote(chat_template_file) } }} --port {{ port }} --lan
+    @uv --project "{{ root }}" run win-models unsloth serve --studio-home "{{ studio_home }}" --hf-cache-dir "{{ hf_cache }}" --model "{{ default_model }}" --max-seq-length {{ context_length }} --parallel {{ parallel }} --cache-type-kv "{{ cache_type_kv }}" --reasoning-format "{{ reasoning_format }}" {{ if chat_template_file == "" { "" } else { "--chat-template-file " + quote(chat_template_file) } }} --port {{ port }} --lan
 
 serve-debug port=studio_port:
     @uv --project "{{ root }}" run win-models unsloth sync-mcp --studio-home "{{ studio_home }}"
-    @uv --project "{{ root }}" run win-models unsloth serve --studio-home "{{ studio_home }}" --hf-cache-dir "{{ hf_cache }}" --model "{{ default_model }}" --max-seq-length {{ context_length }} --parallel {{ parallel }} --cache-type-kv "{{ cache_type_kv }}" {{ if chat_template_file == "" { "" } else { "--chat-template-file " + quote(chat_template_file) } }} --port {{ port }} --log-level DEBUG --open --lan
+    @uv --project "{{ root }}" run win-models unsloth serve --studio-home "{{ studio_home }}" --hf-cache-dir "{{ hf_cache }}" --model "{{ default_model }}" --max-seq-length {{ context_length }} --parallel {{ parallel }} --cache-type-kv "{{ cache_type_kv }}" --reasoning-format "{{ reasoning_format }}" {{ if chat_template_file == "" { "" } else { "--chat-template-file " + quote(chat_template_file) } }} --port {{ port }} --log-level DEBUG --open --lan
 
 stop port=studio_port:
     @uv --project "{{ root }}" run win-models unsloth stop --studio-home "{{ studio_home }}" --port {{ port }}
