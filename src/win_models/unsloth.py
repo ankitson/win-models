@@ -973,7 +973,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
     p.add_argument("--lan", action="store_true")
     p.add_argument("--open", action="store_true")
-    p.add_argument("--enable-tools", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--enable-tools", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--verbose-llama", action="store_true")
     p.set_defaults(func=serve)
 
