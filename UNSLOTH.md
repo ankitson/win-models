@@ -47,6 +47,13 @@ capability detection sees the same template that llama-server renders.
 When `UNSLOTH_DEFAULT_MODEL` points at an embedding model such as
 `Qwen/Qwen3-Embedding-8B-GGUF:Q4_K_M`, the wrapper automatically switches the
 internal llama-server into embedding mode with `--embedding --pooling last`.
+If an OpenAI-compatible API request names a different model in `model`, the
+wrapper now loads that model on demand before serving the request. Requests
+that send `model: "default"` or `model: "auto"` fall back to
+`UNSLOTH_DEFAULT_MODEL`.
+The first request for an uncached model blocks until Studio finishes
+downloading and loading it, so client-side timeouts may need to be higher on
+the first hit.
 
 The launcher patches Studio's CLI to reuse a single default `cli` API key from
 `E:\root\projects\unsloth\auth\cli-api-key.txt`. Set

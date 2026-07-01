@@ -18,6 +18,7 @@ CHAT_TEMPLATE_OVERRIDE_SHIM_MARKER = "UNSLOTH_CHAT_TEMPLATE_OVERRIDE_SHIM"
 CLI_API_KEY_REUSE_SHIM_MARKER = "UNSLOTH_CLI_API_KEY_REUSE_SHIM"
 OPENAI_REASONING_PASSTHROUGH_SHIM_MARKER = "UNSLOTH_OPENAI_REASONING_PASSTHROUGH_SHIM"
 EMBEDDING_EXTRA_ARGS_SHIM_MARKER = "UNSLOTH_EMBEDDING_EXTRA_ARGS_SHIM"
+OPENAI_REQUEST_AUTOLOAD_SHIM_MARKER = "UNSLOTH_OPENAI_REQUEST_AUTOLOAD_SHIM"
 DEFAULT_MCP_CONFIG = (
     Path(__file__).resolve().parents[1] / "unsloth" / "mcp-servers.json"
 )
@@ -530,6 +531,476 @@ def _chat_final_chunk(completion_id, created, model_name, finish_reason) -> str:
     echo("  applied OpenAI reasoning passthrough shim to backend.routes.inference")
 
 
+def apply_openai_request_autoload_shim(studio_home: Path) -> None:
+    target = studio_package_dir(studio_home) / "backend" / "routes" / "inference.py"
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if OPENAI_REQUEST_AUTOLOAD_SHIM_MARKER in text:
+        echo("  OpenAI request autoload shim already present")
+        return
+
+    helper_anchor = '''def _flatten_monitor_prompt(value) -> str:
+    """Flatten an OpenAI prompt/input field (str or list) into the single
+    string the api_monitor prompt preview expects."""
+    if isinstance(value, list):
+        return "\\n".join(str(part) for part in value)
+    return str(value)
+
+
+@router.post("/completions")
+'''
+    helper_replacement = '''def _flatten_monitor_prompt(value) -> str:
+    """Flatten an OpenAI prompt/input field (str or list) into the single
+    string the api_monitor prompt preview expects."""
+    if isinstance(value, list):
+        return "\\n".join(str(part) for part in value)
+    return str(value)
+
+
+def _openai_request_bool_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _openai_request_int_env(name: str, default: int = 0) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("%s has invalid integer value %r", name, raw)
+        return default
+
+
+def _split_openai_requested_model(model_name: str) -> tuple[str, Optional[str]]:
+    # UNSLOTH_OPENAI_REQUEST_AUTOLOAD_SHIM: accept llama.cpp-style repo:variant
+    # ids in API payload.model so request-driven auto-load matches CLI usage.
+    s = model_name.strip()
+    if not s:
+        return s, None
+    if s.startswith(("/", "./", "../", "~")) or s == ".":
+        return s, None
+    if len(s) >= 2 and s[1] == ":" and s[0].isalpha():
+        return s, None
+    if ":" not in s:
+        return s, None
+    repo, _, variant = s.rpartition(":")
+    if not repo or not variant or "/" in variant:
+        return s, None
+    return repo, variant
+
+
+def _openai_requested_model_name(requested_model: object) -> Optional[str]:
+    if requested_model is None:
+        requested = ""
+    else:
+        requested = str(requested_model).strip()
+    if requested and requested.lower() not in {"default", "auto"}:
+        return requested
+    fallback = (os.environ.get("UNSLOTH_DEFAULT_MODEL") or "").strip()
+    return fallback or None
+
+
+def _openai_request_llama_extra_args(model_name: str) -> Optional[list[str]]:
+    args: list[str] = []
+    reasoning_format = (os.environ.get("UNSLOTH_REASONING_FORMAT") or "").strip()
+    if reasoning_format:
+        args.extend(["--reasoning-format", reasoning_format])
+    model_id = model_name.replace("\\\\", "/").lower()
+    if "embed" in model_id or "embedding" in model_id:
+        args.extend(["--embedding", "--pooling", "last"])
+    return args or None
+
+
+def _openai_request_chat_template_override() -> Optional[str]:
+    template_path = (os.environ.get("UNSLOTH_CHAT_TEMPLATE_FILE") or "").strip()
+    if not template_path:
+        return None
+    try:
+        return Path(template_path).read_text(encoding = "utf-8")
+    except OSError as exc:
+        logger.warning("Could not read UNSLOTH_CHAT_TEMPLATE_FILE=%s: %s", template_path, exc)
+        return None
+
+
+async def _autoload_openai_requested_model(
+    request: Request, current_subject: str, requested_model: object
+) -> Optional[str]:
+    requested = _openai_requested_model_name(requested_model)
+    if not requested:
+        return None
+
+    requested_path, requested_variant = _split_openai_requested_model(requested)
+    llama_backend = get_llama_cpp_backend()
+    if llama_backend.is_loaded and llama_backend.model_identifier:
+        active_variant = (getattr(llama_backend, "hf_variant", None) or "").lower()
+        if (
+            llama_backend.model_identifier.lower() == requested_path.lower()
+            and (
+                requested_variant is None
+                or requested_path.lower().endswith(".gguf")
+                or requested_variant.lower() == active_variant
+            )
+        ):
+            return llama_backend.model_identifier
+
+    backend = get_inference_backend()
+    if backend.active_model_name and backend.active_model_name.lower() == requested_path.lower():
+        return backend.active_model_name
+
+    load_request = LoadRequest(
+        model_path = requested_path,
+        gguf_variant = requested_variant,
+        max_seq_length = _openai_request_int_env("UNSLOTH_CONTEXT_LENGTH", 0),
+        load_in_4bit = _openai_request_bool_env("UNSLOTH_AUTOLOAD_LOAD_IN_4BIT", True),
+        chat_template_override = _openai_request_chat_template_override(),
+        cache_type_kv = (os.environ.get("UNSLOTH_CACHE_TYPE_KV") or "").strip() or None,
+        llama_extra_args = _openai_request_llama_extra_args(requested),
+    )
+    logger.info("OpenAI request auto-loading model %s", requested)
+    result = await load_model(
+        load_request,
+        fastapi_request = request,
+        current_subject = current_subject,
+    )
+    return result.model or requested_path
+
+
+@router.post("/completions")
+'''
+    if helper_anchor not in text:
+        raise RuntimeError(f"Could not find OpenAI completions helper anchor in {target}; Studio changed.")
+    text = text.replace(helper_anchor, helper_replacement, 1)
+
+    replacements = [
+        (
+            '''    llama_backend = get_llama_cpp_backend()
+    if not llama_backend.is_loaded:
+        raise HTTPException(
+            status_code = 503,
+            detail = "No GGUF model loaded. Load a GGUF model first.",
+        )
+
+    body = await request.json()
+''',
+            '''    body = await request.json()
+    await _autoload_openai_requested_model(request, current_subject, body.get("model"))
+    llama_backend = get_llama_cpp_backend()
+    if not llama_backend.is_loaded:
+        raise HTTPException(
+            status_code = 503,
+            detail = "No GGUF model loaded. Load a GGUF model first.",
+        )
+''',
+            "OpenAI completions autoload",
+        ),
+        (
+            '''    # ── Determine which backend is active ──────────────────────
+    # Single-model server: any model name serves the loaded model (drop-in
+    # OpenAI compat), so payload.model is only a fallback label here.
+    monitor_id = None
+''',
+            '''    # ── Determine which backend is active ──────────────────────
+    # Single-model server: any model name serves the loaded model (drop-in
+    # OpenAI compat), so payload.model is only a fallback label here.
+    requested_model_name = await _autoload_openai_requested_model(
+        request, current_subject, payload.model
+    )
+    monitor_id = None
+''',
+            "OpenAI chat autoload trigger",
+        ),
+        (
+            '        model_name = llama_backend.model_identifier or payload.model\n',
+            '        model_name = llama_backend.model_identifier or requested_model_name or payload.model\n',
+            "OpenAI chat GGUF model label",
+        ),
+        (
+            '        model_name = backend.active_model_name or payload.model\n',
+            '        model_name = backend.active_model_name or requested_model_name or payload.model\n',
+            "OpenAI chat Unsloth model label",
+        ),
+        (
+            '''    llama_backend = get_llama_cpp_backend()
+    if not llama_backend.is_loaded:
+        raise HTTPException(
+            status_code = 503,
+            detail = "No GGUF model loaded. Load a GGUF model first.",
+        )
+
+    body = await request.json()
+''',
+            '''    body = await request.json()
+    await _autoload_openai_requested_model(request, current_subject, body.get("model"))
+    llama_backend = get_llama_cpp_backend()
+    if not llama_backend.is_loaded:
+        raise HTTPException(
+            status_code = 503,
+            detail = "No GGUF model loaded. Load a GGUF model first.",
+        )
+''',
+            "OpenAI embeddings autoload",
+        ),
+        (
+            '''    if payload.stream:
+''',
+            '''    await _autoload_openai_requested_model(request, current_subject, payload.model)
+
+    if payload.stream:
+''',
+            "OpenAI responses autoload trigger",
+        ),
+    ]
+    for old, new, label in replacements:
+        if old not in text:
+            raise RuntimeError(f"Could not find {label} anchor in {target}; Studio changed.")
+        text = text.replace(old, new, 1)
+
+    target.write_text(text, encoding="utf-8", newline="\n")
+    echo("  applied OpenAI request autoload shim to backend.routes.inference")
+
+
+def apply_openai_request_autoload_shim_v2(studio_home: Path) -> None:
+    target = studio_package_dir(studio_home) / "backend" / "routes" / "inference.py"
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if OPENAI_REQUEST_AUTOLOAD_SHIM_MARKER in text:
+        echo("  OpenAI request autoload shim already present")
+        return
+
+    helper_anchor = '''def _flatten_monitor_prompt(value) -> str:
+    """Flatten an OpenAI prompt/input field (str or list) into the single
+    string the api_monitor prompt preview expects."""
+    if isinstance(value, list):
+        return "\\n".join(str(part) for part in value)
+    return str(value)
+
+
+@router.post("/completions")
+'''
+    helper_replacement = '''def _flatten_monitor_prompt(value) -> str:
+    """Flatten an OpenAI prompt/input field (str or list) into the single
+    string the api_monitor prompt preview expects."""
+    if isinstance(value, list):
+        return "\\n".join(str(part) for part in value)
+    return str(value)
+
+
+def _openai_request_bool_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _openai_request_int_env(name: str, default: int = 0) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("%s has invalid integer value %r", name, raw)
+        return default
+
+
+def _split_openai_requested_model(model_name: str) -> tuple[str, Optional[str]]:
+    # UNSLOTH_OPENAI_REQUEST_AUTOLOAD_SHIM: accept llama.cpp-style repo:variant
+    # ids in API payload.model so request-driven auto-load matches CLI usage.
+    s = model_name.strip()
+    if not s:
+        return s, None
+    if s.startswith(("/", "./", "../", "~")) or s == ".":
+        return s, None
+    if len(s) >= 2 and s[1] == ":" and s[0].isalpha():
+        return s, None
+    if ":" not in s:
+        return s, None
+    repo, _, variant = s.rpartition(":")
+    if not repo or not variant or "/" in variant:
+        return s, None
+    return repo, variant
+
+
+def _openai_requested_model_name(requested_model: object) -> Optional[str]:
+    if requested_model is None:
+        requested = ""
+    else:
+        requested = str(requested_model).strip()
+    if requested and requested.lower() not in {"default", "auto"}:
+        return requested
+    fallback = (os.environ.get("UNSLOTH_DEFAULT_MODEL") or "").strip()
+    return fallback or None
+
+
+def _openai_request_llama_extra_args(model_name: str) -> Optional[list[str]]:
+    args: list[str] = []
+    reasoning_format = (os.environ.get("UNSLOTH_REASONING_FORMAT") or "").strip()
+    if reasoning_format:
+        args.extend(["--reasoning-format", reasoning_format])
+    model_id = model_name.replace("\\\\", "/").lower()
+    if "embed" in model_id or "embedding" in model_id:
+        args.extend(["--embedding", "--pooling", "last"])
+    return args or None
+
+
+def _openai_request_chat_template_override() -> Optional[str]:
+    template_path = (os.environ.get("UNSLOTH_CHAT_TEMPLATE_FILE") or "").strip()
+    if not template_path:
+        return None
+    try:
+        return Path(template_path).read_text(encoding = "utf-8")
+    except OSError as exc:
+        logger.warning("Could not read UNSLOTH_CHAT_TEMPLATE_FILE=%s: %s", template_path, exc)
+        return None
+
+
+async def _autoload_openai_requested_model(
+    request: Request, current_subject: str, requested_model: object
+) -> Optional[str]:
+    requested = _openai_requested_model_name(requested_model)
+    if not requested:
+        return None
+
+    requested_path, requested_variant = _split_openai_requested_model(requested)
+    llama_backend = get_llama_cpp_backend()
+    if llama_backend.is_loaded and llama_backend.model_identifier:
+        active_variant = (getattr(llama_backend, "hf_variant", None) or "").lower()
+        if (
+            llama_backend.model_identifier.lower() == requested_path.lower()
+            and (
+                requested_variant is None
+                or requested_path.lower().endswith(".gguf")
+                or requested_variant.lower() == active_variant
+            )
+        ):
+            return llama_backend.model_identifier
+
+    backend = get_inference_backend()
+    if backend.active_model_name and backend.active_model_name.lower() == requested_path.lower():
+        return backend.active_model_name
+
+    load_request = LoadRequest(
+        model_path = requested_path,
+        gguf_variant = requested_variant,
+        max_seq_length = _openai_request_int_env("UNSLOTH_CONTEXT_LENGTH", 0),
+        load_in_4bit = _openai_request_bool_env("UNSLOTH_AUTOLOAD_LOAD_IN_4BIT", True),
+        chat_template_override = _openai_request_chat_template_override(),
+        cache_type_kv = (os.environ.get("UNSLOTH_CACHE_TYPE_KV") or "").strip() or None,
+        llama_extra_args = _openai_request_llama_extra_args(requested),
+    )
+    logger.info("OpenAI request auto-loading model %s", requested)
+    result = await load_model(
+        load_request,
+        fastapi_request = request,
+        current_subject = current_subject,
+    )
+    return result.model or requested_path
+
+
+@router.post("/completions")
+'''
+    if helper_anchor not in text:
+        raise RuntimeError(f"Could not find OpenAI completions helper anchor in {target}; Studio changed.")
+    text = text.replace(helper_anchor, helper_replacement, 1)
+
+    replacements = [
+        (
+            '''    llama_backend = get_llama_cpp_backend()
+    if not llama_backend.is_loaded:
+        raise HTTPException(
+            status_code = 503,
+            detail = "No GGUF model loaded. Load a GGUF model first.",
+        )
+
+    body = await request.json()
+''',
+            '''    body = await request.json()
+    await _autoload_openai_requested_model(request, current_subject, body.get("model"))
+    llama_backend = get_llama_cpp_backend()
+    if not llama_backend.is_loaded:
+        raise HTTPException(
+            status_code = 503,
+            detail = "No GGUF model loaded. Load a GGUF model first.",
+        )
+''',
+            "OpenAI completions autoload",
+        ),
+        (
+            '''    monitor_id = None
+
+    async def _monitored_generate_audio(model_label: str, context_length: Optional[int] = None):
+''',
+            '''    requested_model_name = await _autoload_openai_requested_model(
+        request, current_subject, payload.model
+    )
+    monitor_id = None
+
+    async def _monitored_generate_audio(model_label: str, context_length: Optional[int] = None):
+''',
+            "OpenAI chat autoload trigger",
+        ),
+        (
+            '        model_name = llama_backend.model_identifier or payload.model\n',
+            '        model_name = llama_backend.model_identifier or requested_model_name or payload.model\n',
+            "OpenAI chat GGUF model label",
+        ),
+        (
+            '        model_name = backend.active_model_name or payload.model\n',
+            '        model_name = backend.active_model_name or requested_model_name or payload.model\n',
+            "OpenAI chat Unsloth model label",
+        ),
+        (
+            '''    llama_backend = get_llama_cpp_backend()
+    if not llama_backend.is_loaded:
+        raise HTTPException(
+            status_code = 503,
+            detail = "No GGUF model loaded. Load a GGUF model first.",
+        )
+
+    body = await request.json()
+''',
+            '''    body = await request.json()
+    await _autoload_openai_requested_model(request, current_subject, body.get("model"))
+    llama_backend = get_llama_cpp_backend()
+    if not llama_backend.is_loaded:
+        raise HTTPException(
+            status_code = 503,
+            detail = "No GGUF model loaded. Load a GGUF model first.",
+        )
+''',
+            "OpenAI embeddings autoload",
+        ),
+        (
+            '''    if not messages:
+        raise HTTPException(status_code = 400, detail = "No input provided.")
+
+    if payload.stream:
+''',
+            '''    if not messages:
+        raise HTTPException(status_code = 400, detail = "No input provided.")
+
+    await _autoload_openai_requested_model(request, current_subject, payload.model)
+
+    if payload.stream:
+''',
+            "OpenAI responses autoload trigger",
+        ),
+    ]
+    for old, new, label in replacements:
+        if old not in text:
+            raise RuntimeError(f"Could not find {label} anchor in {target}; Studio changed.")
+        text = text.replace(old, new, 1)
+
+    target.write_text(text, encoding="utf-8", newline="\n")
+    echo("  applied OpenAI request autoload shim to backend.routes.inference")
+
+
 def find_llama_zips(zip_dir: Path, release_tag: str, runtime: str) -> tuple[Path, Path]:
     bin_name = f"llama-{release_tag}-bin-win-cuda-{runtime}-x64.zip"
     cudart_name = f"cudart-llama-bin-win-cuda-{runtime}-x64.zip"
@@ -773,6 +1244,7 @@ def setup(args: argparse.Namespace) -> None:
     apply_chat_template_override_shim(studio_home)
     apply_cli_api_key_reuse_shim(studio_home)
     apply_openai_reasoning_passthrough_shim(studio_home)
+    apply_openai_request_autoload_shim_v2(studio_home)
     apply_embedding_extra_args_shim(studio_home)
 
     echo(f"\n[2/6] Locating prebuilt zips in {zip_dir} ...")
@@ -819,6 +1291,7 @@ def setup(args: argparse.Namespace) -> None:
     apply_chat_template_override_shim(studio_home)
     apply_cli_api_key_reuse_shim(studio_home)
     apply_openai_reasoning_passthrough_shim(studio_home)
+    apply_openai_request_autoload_shim_v2(studio_home)
     apply_embedding_extra_args_shim(studio_home)
 
     if args.register_model_root:
@@ -841,6 +1314,7 @@ def serve(args: argparse.Namespace) -> None:
     apply_chat_template_override_shim(studio_home)
     apply_cli_api_key_reuse_shim(studio_home)
     apply_openai_reasoning_passthrough_shim(studio_home)
+    apply_openai_request_autoload_shim_v2(studio_home)
     apply_embedding_extra_args_shim(studio_home)
     if args.parallel < 1:
         raise ValueError("--parallel must be at least 1")
@@ -860,11 +1334,18 @@ def serve(args: argparse.Namespace) -> None:
     env["UNSLOTH_STUDIO_HOME"] = str(studio_home)
     env["LOG_LEVEL"] = args.log_level
     env["ENVIRONMENT_TYPE"] = "production"
+    env["UNSLOTH_DEFAULT_MODEL"] = model
+    env["UNSLOTH_CONTEXT_LENGTH"] = str(args.max_seq_length)
+    env["UNSLOTH_AUTOLOAD_LOAD_IN_4BIT"] = "1"
     if args.hf_cache_dir:
         hf_cache_dir = Path(args.hf_cache_dir)
         hf_cache_dir.mkdir(parents=True, exist_ok=True)
         env["HUGGINGFACE_HUB_CACHE"] = str(hf_cache_dir)
         env["HF_HUB_CACHE"] = str(hf_cache_dir)
+    if args.cache_type_kv:
+        env["UNSLOTH_CACHE_TYPE_KV"] = args.cache_type_kv
+    if args.reasoning_format:
+        env["UNSLOTH_REASONING_FORMAT"] = args.reasoning_format
     if args.chat_template_file:
         chat_template_file = Path(args.chat_template_file).resolve()
         if not chat_template_file.is_file():
