@@ -17,9 +17,17 @@ LOCAL_ZIP_MARKER = "UNSLOTH_LOCAL_ZIP_SHIM"
 CHAT_TEMPLATE_OVERRIDE_SHIM_MARKER = "UNSLOTH_CHAT_TEMPLATE_OVERRIDE_SHIM"
 CLI_API_KEY_REUSE_SHIM_MARKER = "UNSLOTH_CLI_API_KEY_REUSE_SHIM"
 OPENAI_REASONING_PASSTHROUGH_SHIM_MARKER = "UNSLOTH_OPENAI_REASONING_PASSTHROUGH_SHIM"
+EMBEDDING_EXTRA_ARGS_SHIM_MARKER = "UNSLOTH_EMBEDDING_EXTRA_ARGS_SHIM"
 DEFAULT_MCP_CONFIG = (
     Path(__file__).resolve().parents[1] / "unsloth" / "mcp-servers.json"
 )
+
+
+def embedding_llama_args(model: str) -> list[str]:
+    model_id = model.replace("\\", "/").lower()
+    if "embed" not in model_id and "embedding" not in model_id:
+        return []
+    return ["--embedding", "--pooling", "last"]
 
 
 def resolve_unsloth_exe(studio_home: Path) -> Path:
@@ -54,6 +62,33 @@ def unsloth_cli_studio_command(studio_home: Path) -> Path:
         / "commands"
         / "studio.py"
     )
+
+
+def apply_embedding_extra_args_shim(studio_home: Path) -> None:
+    target = studio_package_dir(studio_home) / "backend" / "core" / "inference" / "llama_server_args.py"
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if EMBEDDING_EXTRA_ARGS_SHIM_MARKER in text:
+        echo("  embedding extra-args shim already present")
+        return
+
+    old = (
+        '    # Server-mode flips: --embedding / --rerank restrict llama-server to\n'
+        "    # those endpoints, breaking Studio's /v1/chat/completions hop.\n"
+        '    frozenset({"--embedding", "--embeddings"}),\n'
+    )
+    new = (
+        "    # UNSLOTH_EMBEDDING_EXTRA_ARGS_SHIM: win-models may intentionally run\n"
+        "    # Studio with a dedicated embedding model, in which case /v1/chat/\n"
+        "    # completions is irrelevant and the backend must allow --embedding.\n"
+    )
+    if old not in text:
+        raise RuntimeError(
+            f"Could not find the embedding denylist anchor in {target}; the Studio backend changed."
+        )
+    target.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+    echo("  applied embedding extra-args shim to backend.core.inference.llama_server_args")
 
 
 def apply_llama_local_zip_shim(studio_home: Path) -> None:
@@ -738,6 +773,7 @@ def setup(args: argparse.Namespace) -> None:
     apply_chat_template_override_shim(studio_home)
     apply_cli_api_key_reuse_shim(studio_home)
     apply_openai_reasoning_passthrough_shim(studio_home)
+    apply_embedding_extra_args_shim(studio_home)
 
     echo(f"\n[2/6] Locating prebuilt zips in {zip_dir} ...")
     bin_zip, cudart_zip = find_llama_zips(zip_dir, args.release_tag, args.runtime)
@@ -783,6 +819,7 @@ def setup(args: argparse.Namespace) -> None:
     apply_chat_template_override_shim(studio_home)
     apply_cli_api_key_reuse_shim(studio_home)
     apply_openai_reasoning_passthrough_shim(studio_home)
+    apply_embedding_extra_args_shim(studio_home)
 
     if args.register_model_root:
         echo(f"\n[5/6] Registering model folder {model_root} as a Studio scan folder...")
@@ -804,6 +841,7 @@ def serve(args: argparse.Namespace) -> None:
     apply_chat_template_override_shim(studio_home)
     apply_cli_api_key_reuse_shim(studio_home)
     apply_openai_reasoning_passthrough_shim(studio_home)
+    apply_embedding_extra_args_shim(studio_home)
     if args.parallel < 1:
         raise ValueError("--parallel must be at least 1")
     bind_host = "0.0.0.0" if args.lan else args.host
@@ -869,6 +907,9 @@ def serve(args: argparse.Namespace) -> None:
         )
     if args.reasoning_format:
         command.extend(["--reasoning-format", args.reasoning_format])
+    embed_args = embedding_llama_args(model)
+    if embed_args:
+        command.extend(embed_args)
     if args.enable_tools:
         command.append("--enable-tools")
     else:
@@ -884,6 +925,8 @@ def serve(args: argparse.Namespace) -> None:
         echo(f"llama-server KV cache override: --cache-type-k {args.cache_type_kv} --cache-type-v {args.cache_type_kv}")
     if args.reasoning_format:
         echo(f"llama-server reasoning parser: --reasoning-format {args.reasoning_format}")
+    if embed_args:
+        echo(f"llama-server embedding mode: {' '.join(embed_args)}")
     if args.chat_template_file:
         echo(f"Studio chat template override: {Path(args.chat_template_file).resolve()}")
     echo("Backend output will stream in this terminal. Press Ctrl+C to stop.")

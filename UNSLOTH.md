@@ -44,6 +44,9 @@ cache dtype so Studio does not fall back to `4096` context or `f16` KV cache.
 For Gemma 4 instruction-tuned GGUFs, they also pass a repo-pinned
 `chat_template_override` through Studio's load API so Studio's reasoning/tool
 capability detection sees the same template that llama-server renders.
+When `UNSLOTH_DEFAULT_MODEL` points at an embedding model such as
+`Qwen/Qwen3-Embedding-8B-GGUF:Q4_K_M`, the wrapper automatically switches the
+internal llama-server into embedding mode with `--embedding --pooling last`.
 
 The launcher patches Studio's CLI to reuse a single default `cli` API key from
 `E:\root\projects\unsloth\auth\cli-api-key.txt`. Set
@@ -56,6 +59,31 @@ as downloaded models already and intentionally keeps custom-folder entries even
 when they duplicate cached models. `just unsloth setup` therefore does not
 register the model root by default; use `just unsloth register-models <path>`
 only for a separate folder that is not the HF cache.
+
+## Embeddings
+
+Use the existing serve flow by overriding `UNSLOTH_DEFAULT_MODEL`:
+
+```powershell
+$env:UNSLOTH_DEFAULT_MODEL = "Qwen/Qwen3-Embedding-8B-GGUF:Q4_K_M"
+just unsloth serve
+```
+
+Studio prints the API key on startup and also stores it in:
+
+```text
+E:\root\projects\unsloth\auth\cli-api-key.txt
+```
+
+Minimal embedding request:
+
+```powershell
+$token = (Get-Content E:\root\projects\unsloth\auth\cli-api-key.txt).Trim()
+curl.exe http://127.0.0.1:8888/v1/embeddings `
+  -H "Authorization: Bearer $token" `
+  -H "Content-Type: application/json" `
+  -d "{\"model\":\"Qwen/Qwen3-Embedding-8B-GGUF\",\"input\":[\"hello world\"]}"
+```
 
 ## Gemma 4 Chat Template
 
