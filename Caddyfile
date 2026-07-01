@@ -1,0 +1,52 @@
+{
+	# Use DNS-01 challenge so Caddy can get certs even behind a firewall/tunnel
+	email email@ankitson.com
+	acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+}
+
+(common_site) {
+	encode zstd gzip
+	log {
+		output file ./logs/caddy.access.log {
+			roll_size 25MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format json
+	}
+}
+
+*.win.ankitson.com, win.ankitson.com {
+	import common_site
+	@unsloth host unsloth.win.ankitson.com
+	handle @unsloth {
+		reverse_proxy 127.0.0.1:8888
+	}
+
+	@comfy host comfy.win.ankitson.com
+	handle @comfy {
+		reverse_proxy 127.0.0.1:8188
+	}
+
+	@llama host llama.win.ankitson.com
+	handle @llama {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	@litert host litert.win.ankitson.com
+	handle @litert {
+		reverse_proxy 127.0.0.1:9379
+	}
+
+	@root {
+		host win.ankitson.com
+		path /
+	}
+	handle @root {
+		respond "win-models edge is up\n" 200
+	}
+
+	handle {
+		respond "not found\n" 404
+	}
+}
