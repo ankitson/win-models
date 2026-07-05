@@ -23,6 +23,8 @@ $CacheTypeKv = if ($env:UNSLOTH_CACHE_TYPE_KV) { $env:UNSLOTH_CACHE_TYPE_KV } el
 $ReasoningFormat = if ($env:UNSLOTH_REASONING_FORMAT) { $env:UNSLOTH_REASONING_FORMAT } else { "deepseek" }
 $SpeculativeType = if ($env:UNSLOTH_SPECULATIVE_TYPE) { $env:UNSLOTH_SPECULATIVE_TYPE } else { "off" }
 $ChatTemplateFile = if ($env:UNSLOTH_CHAT_TEMPLATE_FILE) { $env:UNSLOTH_CHAT_TEMPLATE_FILE } else { Join-Path $RepoRoot "src\unsloth\chat-templates\gemma-4-31b-it-pr118.jinja" }
+$PromptLog = if ($env:UNSLOTH_PROMPT_LOG) { $env:UNSLOTH_PROMPT_LOG } else { "1" }
+$PromptLogFile = if ($env:UNSLOTH_PROMPT_LOG_FILE) { $env:UNSLOTH_PROMPT_LOG_FILE } else { Join-Path $LogDir "unsloth-prompts.jsonl" }
 $StudioPort = if ($env:WIN_MODELS_STUDIO_PORT) { $env:WIN_MODELS_STUDIO_PORT } else { "8888" }
 $LlamaPort = if ($env:UNSLOTH_LLAMA_PORT) { $env:UNSLOTH_LLAMA_PORT } elseif ($env:WIN_MODELS_LLAMA_PORT) { $env:WIN_MODELS_LLAMA_PORT } else { "8080" }
 $UnslothSourceRepo = if ($env:UNSLOTH_SOURCE_REPO) { $env:UNSLOTH_SOURCE_REPO } else { "" }
@@ -55,6 +57,8 @@ if (-not (Test-Path $WinModelsPython)) {
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+$env:UNSLOTH_PROMPT_LOG = $PromptLog
+$env:UNSLOTH_PROMPT_LOG_FILE = $PromptLogFile
 foreach ($path in @($CaddyOutLog, $CaddyErrLog, $CaddyAccessLog, $UnslothOutLog, $UnslothErrLog, $LmstudioOutLog, $LmstudioErrLog, $AsrOutLog, $AsrErrLog)) {
     if (-not (Test-Path $path)) {
         New-Item -ItemType File -Path $path | Out-Null

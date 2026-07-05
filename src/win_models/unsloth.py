@@ -25,6 +25,7 @@ EMBEDDING_EXTRA_ARGS_SHIM_MARKER = "UNSLOTH_EMBEDDING_EXTRA_ARGS_SHIM"
 FIXED_LLAMA_PORT_SHIM_MARKER = "UNSLOTH_FIXED_LLAMA_PORT_SHIM"
 OPENAI_REQUEST_AUTOLOAD_SHIM_MARKER = "UNSLOTH_OPENAI_REQUEST_AUTOLOAD_SHIM"
 OPENAI_AUTOLOAD_SPECULATIVE_SHIM_MARKER = "UNSLOTH_OPENAI_AUTOLOAD_SPECULATIVE_SHIM"
+OPENAI_PROMPT_LOGGING_SHIM_MARKER = "UNSLOTH_OPENAI_PROMPT_LOGGING_SHIM"
 WEB_UI_TOOL_POLICY_SHIM_MARKER = "UNSLOTH_WEB_UI_TOOL_POLICY_SHIM"
 NATIVE_AUDIO_MIC_SHIM_MARKER = "UNSLOTH_NATIVE_AUDIO_MIC_SHIM"
 ASSISTANT_PREFIX_CONTINUATION_SHIM_MARKER = "UNSLOTH_ASSISTANT_PREFIX_CONTINUATION_SHIM"
@@ -1781,6 +1782,271 @@ def apply_openai_autoload_speculative_shim(studio_home: Path) -> None:
     )
     target.write_text(text.replace(anchor, replacement, 1), encoding="utf-8", newline="\n")
     echo("  applied OpenAI autoload speculative shim to backend.routes.inference")
+
+
+def apply_openai_prompt_logging_shim(studio_home: Path) -> None:
+    target = studio_package_dir(studio_home) / "backend" / "routes" / "inference.py"
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if OPENAI_PROMPT_LOGGING_SHIM_MARKER in text:
+        echo("  OpenAI prompt logging shim already present")
+        return
+
+    helper = f'''
+
+def _prompt_log_enabled() -> bool:
+    raw = (os.environ.get("UNSLOTH_PROMPT_LOG") or "").strip().lower()
+    return raw in {{"1", "true", "yes", "on"}}
+
+
+def _prompt_log_file() -> Optional[Path]:
+    if not _prompt_log_enabled():
+        return None
+    raw = (os.environ.get("UNSLOTH_PROMPT_LOG_FILE") or "").strip()
+    if raw:
+        return Path(raw)
+    home = Path(os.environ.get("UNSLOTH_STUDIO_HOME") or ".")
+    return home / "logs" / "unsloth-prompts.jsonl"
+
+
+def _json_char_len(value: object) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii = False, default = str))
+    except Exception:
+        return 0
+
+
+def _prompt_log_message_count(body: object) -> Optional[int]:
+    if isinstance(body, dict):
+        messages = body.get("messages")
+        if isinstance(messages, list):
+            return len(messages)
+        if body.get("prompt") is not None:
+            return 1
+    return None
+
+
+def _write_prompt_log(
+    request: Optional[Request],
+    *,
+    route: str,
+    model: object,
+    body: object,
+    completion_id: Optional[str] = None,
+) -> None:
+    # {OPENAI_PROMPT_LOGGING_SHIM_MARKER}: durable input-side prompt capture.
+    path = _prompt_log_file()
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents = True, exist_ok = True)
+        record = {{
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "route": route,
+            "method": request.method if request is not None else None,
+            "path": str(request.url.path) if request is not None else None,
+            "model": str(model) if model is not None else None,
+            "completion_id": completion_id,
+            "stream": body.get("stream") if isinstance(body, dict) else None,
+            "message_count": _prompt_log_message_count(body),
+            "body_chars": _json_char_len(body),
+            "body": body,
+        }}
+        with path.open("a", encoding = "utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii = False, default = str) + "\\n")
+    except Exception as exc:
+        logger.warning("Could not write UNSLOTH_PROMPT_LOG_FILE: %s", exc)
+
+
+def _chat_prompt_log_body(
+    payload,
+    *,
+    model: object,
+    messages: list[dict],
+    max_tokens: Optional[int],
+    stop,
+    tools = None,
+) -> dict:
+    body = {{
+        "model": model,
+        "messages": messages,
+        "stream": payload.stream,
+        "temperature": payload.temperature,
+        "top_p": payload.top_p,
+        "top_k": payload.top_k,
+        "min_p": payload.min_p,
+        "max_tokens": max_tokens,
+        "stop": stop,
+        "repetition_penalty": payload.repetition_penalty,
+        "presence_penalty": payload.presence_penalty,
+        "seed": payload.seed,
+        "enable_thinking": payload.enable_thinking,
+        "reasoning_effort": payload.reasoning_effort,
+        "preserve_thinking": payload.preserve_thinking,
+    }}
+    if tools is not None:
+        body["tools"] = tools
+    return body
+'''
+    text = _replace_once(
+        text,
+        "\ndef _build_openai_passthrough_body(\n",
+        helper + "\ndef _build_openai_passthrough_body(\n",
+        target,
+        "OpenAI prompt logging helper",
+    )
+
+    replacements = [
+        (
+            '''    body = _build_openai_passthrough_body(
+        payload, backend_ctx = llama_backend.context_length, llama_backend = llama_backend
+    )
+
+    _cancel_keys = (payload.cancel_id, payload.session_id, completion_id)
+''',
+            '''    body = _build_openai_passthrough_body(
+        payload, backend_ctx = llama_backend.context_length, llama_backend = llama_backend
+    )
+    _write_prompt_log(
+        request,
+        route = "openai.chat_completions.passthrough_stream",
+        model = model_name,
+        body = body,
+        completion_id = completion_id,
+    )
+
+    _cancel_keys = (payload.cancel_id, payload.session_id, completion_id)
+''',
+            "OpenAI prompt logging passthrough stream",
+        ),
+        (
+            '''async def _openai_passthrough_non_streaming(
+    llama_backend,
+    payload,
+    model_name,
+    monitor_id: Optional[str] = None,
+):
+''',
+            '''async def _openai_passthrough_non_streaming(
+    request,
+    llama_backend,
+    payload,
+    model_name,
+    monitor_id: Optional[str] = None,
+):
+''',
+            "OpenAI prompt logging non-stream signature",
+        ),
+        (
+            '''    body = _build_openai_passthrough_body(
+        payload, backend_ctx = llama_backend.context_length, llama_backend = llama_backend
+    )
+
+    _truncate_budget = (
+''',
+            '''    body = _build_openai_passthrough_body(
+        payload, backend_ctx = llama_backend.context_length, llama_backend = llama_backend
+    )
+    _write_prompt_log(
+        request,
+        route = "openai.chat_completions.passthrough_non_stream",
+        model = model_name,
+        body = body,
+    )
+
+    _truncate_budget = (
+''',
+            "OpenAI prompt logging passthrough non-stream",
+        ),
+        (
+            '''        return await _openai_passthrough_non_streaming(
+            llama_backend,
+            payload,
+            model_name,
+            monitor_id = monitor_id,
+        )
+''',
+            '''        return await _openai_passthrough_non_streaming(
+            request,
+            llama_backend,
+            payload,
+            model_name,
+            monitor_id = monitor_id,
+        )
+''',
+            "OpenAI prompt logging passthrough non-stream call",
+        ),
+        (
+            '''            def gguf_generate_with_tools():
+                return llama_backend.generate_chat_completion_with_tools(
+''',
+            '''            _write_prompt_log(
+                request,
+                route = "openai.chat_completions.gguf_tools",
+                model = model_name,
+                body = _chat_prompt_log_body(
+                    payload,
+                    model = model_name,
+                    messages = gguf_messages,
+                    max_tokens = effective_max_tokens,
+                    stop = normalized_stop,
+                    tools = tools_to_use,
+                ),
+                completion_id = completion_id,
+            )
+
+            def gguf_generate_with_tools():
+                return llama_backend.generate_chat_completion_with_tools(
+''',
+            "OpenAI prompt logging GGUF tools",
+        ),
+        (
+            '''        def gguf_generate(choice_index: int = 0):
+            _seed = payload.seed
+''',
+            '''        _write_prompt_log(
+            request,
+            route = "openai.chat_completions.gguf",
+            model = model_name,
+            body = _chat_prompt_log_body(
+                payload,
+                model = model_name,
+                messages = gguf_messages,
+                max_tokens = effective_max_tokens,
+                stop = normalized_stop,
+            ),
+            completion_id = completion_id,
+        )
+
+        def gguf_generate(choice_index: int = 0):
+            _seed = payload.seed
+''',
+            "OpenAI prompt logging GGUF standard",
+        ),
+        (
+            '''    prompt_text = _flatten_monitor_prompt(body.get("prompt", ""))
+    monitor_id = api_monitor.start(
+''',
+            '''    prompt_text = _flatten_monitor_prompt(body.get("prompt", ""))
+    _write_prompt_log(
+        request,
+        route = "openai.completions",
+        model = body.get("model") or llama_backend.model_identifier or "default",
+        body = body,
+    )
+    monitor_id = api_monitor.start(
+''',
+            "OpenAI prompt logging completions",
+        ),
+    ]
+    for old, new, label in replacements:
+        if old not in text:
+            raise RuntimeError(f"Could not find {label} anchor in {target}; Studio changed.")
+        text = text.replace(old, new, 1)
+
+    target.write_text(text, encoding="utf-8", newline="\n")
+    echo("  applied OpenAI prompt logging shim to backend.routes.inference")
 
 
 def apply_web_ui_tool_policy_shim(studio_home: Path) -> None:
@@ -5173,6 +5439,7 @@ def apply_studio_patch_stack(studio_home: Path, *, build_frontend: bool = False)
     apply_openai_reasoning_passthrough_shim(studio_home)
     apply_openai_request_autoload_shim_v2(studio_home)
     apply_openai_autoload_speculative_shim(studio_home)
+    apply_openai_prompt_logging_shim(studio_home)
     apply_web_ui_tool_policy_shim(studio_home)
     apply_embedding_extra_args_shim(studio_home)
     apply_fixed_llama_port_shim(studio_home)
@@ -5553,6 +5820,11 @@ def serve(args: argparse.Namespace) -> None:
         echo(f"llama-server embedding mode: {' '.join(embed_args)}")
     if args.chat_template_file:
         echo(f"Studio chat template override: {Path(args.chat_template_file).resolve()}")
+    if (env.get("UNSLOTH_PROMPT_LOG") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        prompt_log_file = env.get("UNSLOTH_PROMPT_LOG_FILE") or str(
+            studio_home / "logs" / "unsloth-prompts.jsonl"
+        )
+        echo(f"Studio prompt input log: {prompt_log_file}")
     if source_repo is not None:
         echo(f"Unsloth source mode: {source_repo}")
         if not args.source_apply_shims:
