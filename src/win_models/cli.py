@@ -31,3 +31,7 @@ def main(argv: list[str] | None = None) -> None:
     if area not in AREAS:
         parser.error(f"invalid choice: {area!r} (choose from {', '.join(AREAS)})")
     AREAS[area][1](argv[1:])
+
+
+if __name__ == "__main__":
+    main()

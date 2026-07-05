@@ -12,6 +12,10 @@ Import-WinModelsDotEnvSecret -Path (Join-Path $RepoRoot ".env.secret")
 $StudioHome = if ($env:UNSLOTH_STUDIO_HOME) { $env:UNSLOTH_STUDIO_HOME } else { "E:\root\projects\unsloth" }
 $ModelRoot = if ($env:WIN_MODELS_MODEL_ROOT) { $env:WIN_MODELS_MODEL_ROOT } else { "E:\root\projects\models" }
 $HfCache = if ($env:UNSLOTH_HF_CACHE) { $env:UNSLOTH_HF_CACHE } else { $ModelRoot }
+$ComfyHome = if ($env:COMFYUI_HOME) { $env:COMFYUI_HOME } else { "E:\root\projects\comfyui" }
+$ComfyModelRoot = if ($env:COMFYUI_MODEL_ROOT) { $env:COMFYUI_MODEL_ROOT } else { Join-Path $ModelRoot "comfyui" }
+$ComfyPort = if ($env:COMFYUI_PORT) { $env:COMFYUI_PORT } else { "8188" }
+$ComfyMemory = if ($env:COMFYUI_MEMORY) { $env:COMFYUI_MEMORY } else { "auto" }
 $DefaultModel = if ($env:UNSLOTH_DEFAULT_MODEL) { $env:UNSLOTH_DEFAULT_MODEL } else { "unsloth/gemma-4-26B-A4B-it-qat-GGUF:UD-Q4_K_XL" }
 $ContextLength = if ($env:UNSLOTH_CONTEXT_LENGTH) { $env:UNSLOTH_CONTEXT_LENGTH } else { "131072" }
 $Parallel = if ($env:UNSLOTH_PARALLEL) { $env:UNSLOTH_PARALLEL } else { "1" }
@@ -45,6 +49,10 @@ $LmstudioOutLog = Join-Path $LogDir "lmstudio.out.log"
 $LmstudioErrLog = Join-Path $LogDir "lmstudio.err.log"
 $AsrOutLog = Join-Path $LogDir "parakeet-asr.out.log"
 $AsrErrLog = Join-Path $LogDir "parakeet-asr.err.log"
+$WinModelsPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $WinModelsPython)) {
+    throw "Missing repo venv Python at $WinModelsPython. Run `uv sync` once before using just serve."
+}
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 foreach ($path in @($CaddyOutLog, $CaddyErrLog, $CaddyAccessLog, $UnslothOutLog, $UnslothErrLog, $LmstudioOutLog, $LmstudioErrLog, $AsrOutLog, $AsrErrLog)) {
@@ -56,9 +64,14 @@ foreach ($path in @($CaddyOutLog, $CaddyErrLog, $UnslothOutLog, $UnslothErrLog, 
     Clear-Content -Path $path -ErrorAction SilentlyContinue
 }
 
-$Just = Get-Command just -ErrorAction Stop
-$Uv = Get-Command uv -ErrorAction Stop
 $Caddy = Get-Command caddy -ErrorAction Stop
+$priorPythonPath = $env:PYTHONPATH
+$env:PYTHONPATH = if ($priorPythonPath) { "$RepoRoot\src;$priorPythonPath" } else { "$RepoRoot\src" }
+
+function Invoke-WinModels {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+    & $WinModelsPython -m win_models.cli @Arguments
+}
 
 function Resolve-RequiredSecret {
     param(
@@ -104,25 +117,35 @@ if (Get-NetTCPConnection -State Listen -LocalPort 443 -ErrorAction SilentlyConti
     throw "Port 443 is already in use after attempting to stop Caddy. Free the port, then re-run just serve."
 }
 
-& $Uv.Source --project $RepoRoot run win-models unsloth sync-mcp --studio-home $StudioHome
-& $Just.Source comfy serve
+Invoke-WinModels unsloth sync-mcp --studio-home $StudioHome
+$comfyArgs = @(
+    "-m", "win_models.cli",
+    "comfy", "serve",
+    "--comfy-home", $ComfyHome,
+    "--model-root", $ComfyModelRoot,
+    "--host", "127.0.0.1",
+    "--port", $ComfyPort,
+    "--log-dir", $LogDir,
+    "--memory-mode", $ComfyMemory
+)
+$comfyProcess = Start-Process -FilePath $WinModelsPython -ArgumentList $comfyArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -PassThru
 
 $lmstudioProcess = $null
 if ($LmstudioEnabled -ne "0") {
     $lmSetupArgs = @(
-        "--project", $RepoRoot,
-        "run", "win-models", "lmstudio", "setup",
+        "-m", "win_models.cli",
+        "lmstudio", "setup",
         "--hf-cache", $HfCache,
         "--lmstudio-model-root", $LmstudioModelRoot
     )
-    $lmSetup = Start-Process -FilePath $Uv.Source -ArgumentList $lmSetupArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $LmstudioOutLog -RedirectStandardError $LmstudioErrLog -PassThru -Wait
+    $lmSetup = Start-Process -FilePath $WinModelsPython -ArgumentList $lmSetupArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $LmstudioOutLog -RedirectStandardError $LmstudioErrLog -PassThru -Wait
     if ($lmSetup.ExitCode -ne 0) {
         Write-Output ("LM Studio model sync exited with code {0}; see {1} and {2}." -f $lmSetup.ExitCode, $LmstudioOutLog, $LmstudioErrLog)
     }
 
     $lmServeArgs = @(
-        "--project", $RepoRoot,
-        "run", "win-models", "lmstudio", "serve",
+        "-m", "win_models.cli",
+        "lmstudio", "serve",
         "--host", $LmstudioHost,
         "--port", $LmstudioPort,
         "--context-length", $LmstudioContextLength,
@@ -131,7 +154,7 @@ if ($LmstudioEnabled -ne "0") {
     if ($LmstudioDefaultModel) {
         $lmServeArgs += @("--model", $LmstudioDefaultModel)
     }
-    $lmstudioProcess = Start-Process -FilePath $Uv.Source -ArgumentList $lmServeArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $LmstudioOutLog -RedirectStandardError $LmstudioErrLog -PassThru
+    $lmstudioProcess = Start-Process -FilePath $WinModelsPython -ArgumentList $lmServeArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $LmstudioOutLog -RedirectStandardError $LmstudioErrLog -PassThru
 } else {
     Write-Output "LM Studio integration disabled by WIN_MODELS_LMSTUDIO_ENABLED=0."
 }
@@ -171,8 +194,8 @@ if ($AsrEnabled -ne "0") {
 }
 
 $unslothArgs = @(
-    "--project", $RepoRoot,
-    "run", "win-models", "unsloth", "serve",
+    "-m", "win_models.cli",
+    "unsloth", "serve",
     "--studio-home", $StudioHome,
     "--hf-cache-dir", $HfCache,
     "--model", $DefaultModel,
@@ -194,10 +217,16 @@ if ($UnslothSourceRepo) {
     }
 }
 
-$unslothProcess = Start-Process -FilePath $Uv.Source -ArgumentList $unslothArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $UnslothOutLog -RedirectStandardError $UnslothErrLog -PassThru
+$unslothProcess = Start-Process -FilePath $WinModelsPython -ArgumentList $unslothArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $UnslothOutLog -RedirectStandardError $UnslothErrLog -PassThru
 $caddyProcess = Start-Process -FilePath $Caddy.Source -ArgumentList @("run", "--config", $CaddyConfig) -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $CaddyOutLog -RedirectStandardError $CaddyErrLog -PassThru
 
-Write-Output ("Started ComfyUI via `just comfy serve`.")
+if ($null -eq $priorPythonPath) {
+    Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue
+} else {
+    $env:PYTHONPATH = $priorPythonPath
+}
+
+Write-Output ("Started ComfyUI background PID {0}. Logs: {1}, {2}" -f $comfyProcess.Id, (Join-Path $LogDir "comfyui.out.log"), (Join-Path $LogDir "comfyui.err.log"))
 if ($asrProcess) {
     Write-Output ("Started Parakeet ASR background PID {0}. Logs: {1}, {2}" -f $asrProcess.Id, $AsrOutLog, $AsrErrLog)
 }

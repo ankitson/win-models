@@ -10,6 +10,39 @@ $StudioHome = if ($env:UNSLOTH_STUDIO_HOME) { $env:UNSLOTH_STUDIO_HOME } else { 
 $StudioPort = if ($env:WIN_MODELS_STUDIO_PORT) { $env:WIN_MODELS_STUDIO_PORT } else { "8888" }
 $LlamaPort = if ($env:UNSLOTH_LLAMA_PORT) { $env:UNSLOTH_LLAMA_PORT } elseif ($env:WIN_MODELS_LLAMA_PORT) { $env:WIN_MODELS_LLAMA_PORT } else { "8080" }
 $AsrPort = if ($env:WIN_MODELS_ASR_PORT) { $env:WIN_MODELS_ASR_PORT } else { "8891" }
+$ComfyPort = if ($env:COMFYUI_PORT) { $env:COMFYUI_PORT } else { "8188" }
+$WinModelsPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $WinModelsPython)) {
+    throw "Missing repo venv Python at $WinModelsPython. Run `uv sync` once before using just stop."
+}
+$priorPythonPath = $env:PYTHONPATH
+$env:PYTHONPATH = if ($priorPythonPath) { "$RepoRoot\src;$priorPythonPath" } else { "$RepoRoot\src" }
+
+function Invoke-WinModels {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+    & $WinModelsPython -m win_models.cli @Arguments
+}
+
+function Stop-StaleWinModelsConsoleScripts {
+    $escapedRepo = [regex]::Escape($RepoRoot)
+    $processes = Get-CimInstance Win32_Process |
+        Where-Object {
+            $_.CommandLine -and
+            $_.CommandLine -match $escapedRepo -and
+            (
+                $_.CommandLine -match '\\.venv\\Scripts\\win-models\.exe' -or
+                $_.CommandLine -match '\\buv(?:\\.exe)?\\b.*\\brun\\s+win-models\\b'
+            )
+        }
+    foreach ($process in $processes) {
+        try {
+            Stop-Process -Id $process.ProcessId -Force
+            Write-Output ("Stopped stale win-models console-script wrapper PID {0}." -f $process.ProcessId)
+        } catch {
+            Write-Output ("Could not stop stale win-models wrapper PID {0}: {1}" -f $process.ProcessId, $_.Exception.Message)
+        }
+    }
+}
 
 function Stop-CaddyForEdge {
     $caddy = Get-Command caddy -ErrorAction SilentlyContinue
@@ -36,10 +69,7 @@ function Stop-CaddyForEdge {
 
 Stop-CaddyForEdge
 
-$just = Get-Command just -ErrorAction Stop
-$uv = Get-Command uv -ErrorAction Stop
-
-& $uv.Source --project $RepoRoot run win-models unsloth stop --studio-home $StudioHome --port $StudioPort
+Invoke-WinModels unsloth stop --studio-home $StudioHome --port $StudioPort
 $llamaConnections = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$LlamaPort) -ErrorAction SilentlyContinue)
 foreach ($connection in $llamaConnections) {
     $process = Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue
@@ -48,8 +78,15 @@ foreach ($connection in $llamaConnections) {
         Write-Output ("Stopped orphaned llama-server PID {0} listening on port {1}." -f $process.Id, $LlamaPort)
     }
 }
-& $uv.Source --project $RepoRoot run win-models lmstudio stop
-& $uv.Source --project $RepoRoot run win-models parakeet stop --port $AsrPort
-& $just.Source comfy stop
+Invoke-WinModels lmstudio stop
+Invoke-WinModels parakeet stop --port $AsrPort
+Invoke-WinModels comfy stop --port $ComfyPort
+Stop-StaleWinModelsConsoleScripts
+
+if ($null -eq $priorPythonPath) {
+    Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue
+} else {
+    $env:PYTHONPATH = $priorPythonPath
+}
 
 Write-Output "Stopped edge stack."
