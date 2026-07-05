@@ -16,6 +16,8 @@ $fileNames = @(
     "caddy.out.log",
     "edge-unsloth.err.log",
     "edge-unsloth.out.log",
+    "parakeet-asr.err.log",
+    "parakeet-asr.out.log",
     "comfyui.err.log",
     "comfyui.out.log"
 )
@@ -26,6 +28,8 @@ $palette = @(
     "Yellow",
     "DarkYellow",
     "Green",
+    "DarkGreen",
+    "Red",
     "Magenta",
     "Blue"
 )

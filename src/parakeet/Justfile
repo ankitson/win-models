@@ -1,0 +1,22 @@
+set shell := ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+
+root := module_directory() / "../.."
+model_root := env_var_or_default("WIN_MODELS_MODEL_ROOT", "E:\\root\\projects\\models")
+asr_home := env_var_or_default("WIN_MODELS_PARAKEET_HOME", "E:\\root\\projects\\parakeet-asr")
+asr_host := env_var_or_default("WIN_MODELS_ASR_HOST", "127.0.0.1")
+asr_port := env_var_or_default("WIN_MODELS_ASR_PORT", "8891")
+asr_model := env_var_or_default("WIN_MODELS_ASR_MODEL", "nvidia/parakeet-tdt-0.6b-v2")
+asr_python := env_var_or_default("WIN_MODELS_ASR_PYTHON", "3.13")
+log_dir := env_var_or_default("WIN_MODELS_LOG_DIR", root / "logs")
+
+default:
+    @just --justfile "{{ module_directory() }}/Justfile" --working-directory "{{ module_directory() }}" --list
+
+setup *args:
+    @uv --project "{{ root }}" run win-models parakeet setup --home "{{ asr_home }}" --python "{{ asr_python }}" {{args}}
+
+serve *args:
+    @New-Item -ItemType Directory -Force -Path "{{ log_dir }}" | Out-Null; if (-not (Test-Path "{{ log_dir }}\\parakeet-asr.err.log")) { New-Item -ItemType File -Path "{{ log_dir }}\\parakeet-asr.err.log" | Out-Null }; $env:PYTHONPATH="{{ root }}\\src"; $env:PYTHONUNBUFFERED="1"; & "{{ asr_home }}\\.venv\\Scripts\\python.exe" -m win_models.parakeet_asr serve --host "{{ asr_host }}" --port {{ asr_port }} --model "{{ asr_model }}" --cache-dir "{{ model_root }}" {{args}} 2>&1 | Tee-Object -FilePath "{{ log_dir }}\\parakeet-asr.out.log" -Append
+
+stop:
+    @uv --project "{{ root }}" run win-models parakeet stop --port {{ asr_port }}
