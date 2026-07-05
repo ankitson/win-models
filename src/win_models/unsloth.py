@@ -1338,7 +1338,7 @@ def _openai_requested_model_name(requested_model: object) -> Optional[str]:
         requested = ""
     else:
         requested = str(requested_model).strip()
-    if requested and requested.lower() not in {"default", "auto"}:
+    if requested and requested.lower() not in {"default", "auto", "current", "unsloth/default", "unsloth/current"}:
         return requested
     fallback = (os.environ.get("UNSLOTH_DEFAULT_MODEL") or "").strip()
     return fallback or None
@@ -1369,12 +1369,20 @@ def _openai_request_chat_template_override() -> Optional[str]:
 async def _autoload_openai_requested_model(
     request: Request, current_subject: str, requested_model: object
 ) -> Optional[str]:
+    requested_alias = "" if requested_model is None else str(requested_model).strip().lower()
+    llama_backend = get_llama_cpp_backend()
+    backend = get_inference_backend()
+    if requested_alias in {"current", "unsloth/current"}:
+        if llama_backend.is_loaded and llama_backend.model_identifier:
+            return llama_backend.model_identifier
+        if backend.active_model_name:
+            return backend.active_model_name
+
     requested = _openai_requested_model_name(requested_model)
     if not requested:
         return None
 
     requested_path, requested_variant = _split_openai_requested_model(requested)
-    llama_backend = get_llama_cpp_backend()
     if llama_backend.is_loaded and llama_backend.model_identifier:
         active_variant = (getattr(llama_backend, "hf_variant", None) or "").lower()
         if (
@@ -1387,7 +1395,6 @@ async def _autoload_openai_requested_model(
         ):
             return llama_backend.model_identifier
 
-    backend = get_inference_backend()
     if backend.active_model_name and backend.active_model_name.lower() == requested_path.lower():
         return backend.active_model_name
 
@@ -1571,7 +1578,7 @@ def _openai_requested_model_name(requested_model: object) -> Optional[str]:
         requested = ""
     else:
         requested = str(requested_model).strip()
-    if requested and requested.lower() not in {"default", "auto"}:
+    if requested and requested.lower() not in {"default", "auto", "current", "unsloth/default", "unsloth/current"}:
         return requested
     fallback = (os.environ.get("UNSLOTH_DEFAULT_MODEL") or "").strip()
     return fallback or None
@@ -1602,12 +1609,20 @@ def _openai_request_chat_template_override() -> Optional[str]:
 async def _autoload_openai_requested_model(
     request: Request, current_subject: str, requested_model: object
 ) -> Optional[str]:
+    requested_alias = "" if requested_model is None else str(requested_model).strip().lower()
+    llama_backend = get_llama_cpp_backend()
+    backend = get_inference_backend()
+    if requested_alias in {"current", "unsloth/current"}:
+        if llama_backend.is_loaded and llama_backend.model_identifier:
+            return llama_backend.model_identifier
+        if backend.active_model_name:
+            return backend.active_model_name
+
     requested = _openai_requested_model_name(requested_model)
     if not requested:
         return None
 
     requested_path, requested_variant = _split_openai_requested_model(requested)
-    llama_backend = get_llama_cpp_backend()
     if llama_backend.is_loaded and llama_backend.model_identifier:
         active_variant = (getattr(llama_backend, "hf_variant", None) or "").lower()
         if (
@@ -1620,7 +1635,6 @@ async def _autoload_openai_requested_model(
         ):
             return llama_backend.model_identifier
 
-    backend = get_inference_backend()
     if backend.active_model_name and backend.active_model_name.lower() == requested_path.lower():
         return backend.active_model_name
 
