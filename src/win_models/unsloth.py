@@ -85,6 +85,8 @@ const DEFAULT_RECORDING_SECONDS = 120;
 const GEMMA_NATIVE_AUDIO_RECORDING_SECONDS = 30;
 const WARNING_SECONDS = 5;
 
+export const DEFAULT_VOICE_MESSAGE_PROMPT_TEXT = "";
+
 function clampRecordingSeconds(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_RECORDING_SECONDS;
   return Math.min(
@@ -103,6 +105,27 @@ export function getEffectiveVoiceRecordingMaxSeconds(
     return Math.min(configured, GEMMA_NATIVE_AUDIO_RECORDING_SECONDS);
   }
   return configured;
+}
+
+export function buildVoiceMessageText({
+  existingText,
+  transcript,
+  promptText,
+}: {
+  existingText?: string | null;
+  transcript?: string | null;
+  promptText?: string | null;
+}): string {
+  const parts: string[] = [];
+  const existing = (existingText ?? "").trim();
+  const prompt = (promptText ?? "").trim();
+  const voiceTranscript = (transcript ?? "").trim();
+  if (existing) parts.push(existing);
+  if (prompt && (!existing || !existing.includes(prompt))) parts.push(prompt);
+  if (voiceTranscript) {
+    parts.push(`Voice message transcript:\\n${voiceTranscript}`);
+  }
+  return parts.join("\\n\\n");
 }
 
 function pickMimeType(): string | undefined {
@@ -151,7 +174,7 @@ function playWarningBeep(): void {
 }
 
 export function useNativeAudioRecorder(
-  onAudioReady: (base64: string, name: string) => void,
+  onAudioReady: (base64: string, name: string) => void | Promise<void>,
   maxSeconds: number,
 ): {
   status: NativeAudioRecorderStatus;
@@ -299,7 +322,7 @@ export function useNativeAudioRecorder(
             .replace(/[:.]/g, "-")}.${ext}`;
           const file = new File([blob], name, { type: blob.type });
           const base64 = await fileToBase64(file);
-          onAudioReadyRef.current(base64, name);
+          await onAudioReadyRef.current(base64, name);
           toast.success("Voice message recorded", {
             description: "Press Send to use the voice message in this chat.",
           });
@@ -1695,12 +1718,19 @@ def _looks_like_tailwind_token(token: str) -> bool:
         return False
     if not _balanced_tailwind_token(token):
         return False
-    base = token.rsplit(":", 1)[-1]
-    if token.startswith("[") or ":[" in token:
+
+    prefix, sep, base = token.rpartition(":")
+    if base.startswith("!"):
+        base = base[1:]
+    if base.endswith("!"):
+        base = base[:-1]
+    check_token = f"{prefix}{sep}{base}" if sep else base
+
+    if check_token.startswith("[") or ":[" in check_token:
         return True
-    if token in TAILWIND_COMMON_TOKENS:
+    if check_token in TAILWIND_COMMON_TOKENS:
         return True
-    if token.startswith(TAILWIND_TOKEN_PREFIXES):
+    if check_token.startswith(TAILWIND_TOKEN_PREFIXES):
         return True
     return base in TAILWIND_COMMON_TOKENS or base.startswith(TAILWIND_TOKEN_PREFIXES)
 
@@ -1712,6 +1742,10 @@ def _iter_source_string_tokens(text: str) -> set[str]:
         value = value.replace("\\n", " ").replace("\\t", " ")
         for raw in re.split(r"\s+", value):
             token = raw.strip().strip(",")
+            for _ in range(2):
+                token = token.strip("{}")
+                token = token.strip("\"'`()")
+                token = token.strip(",")
             if _looks_like_tailwind_token(token):
                 tokens.add(token)
     return tokens
@@ -1786,6 +1820,102 @@ def _apply_tailwind_safe_source_shim(frontend: Path) -> bool:
     return True
 
 
+def _apply_settings_dialog_layout_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "index.css"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    marker = "UNSLOTH_SETTINGS_DIALOG_LAYOUT_SHIM"
+    if marker in text:
+        return False
+    anchor = "\t/* Settings dialog: no shadow in dark mode. */\n"
+    css = (
+        f"\t/* {marker}: do not depend on Tailwind arbitrary max-width generation. */\n"
+        "\t.settings-surface {\n"
+        "\t\twidth: min(820px, calc(100vw - 2rem));\n"
+        "\t\tmax-width: min(820px, calc(100vw - 2rem)) !important;\n"
+        "\t}\n\n"
+        "\t@media (max-width: 639px) {\n"
+        "\t\t.settings-surface {\n"
+        "\t\t\twidth: 100dvw !important;\n"
+        "\t\t\tmax-width: none !important;\n"
+        "\t\t\theight: 100dvh;\n"
+        "\t\t\tborder-radius: 0;\n"
+        "\t\t}\n"
+        "\t}\n\n"
+    )
+    new_text = _replace_once(text, anchor, css + anchor, target, "settings dialog layout CSS")
+    target.write_text(new_text, encoding="utf-8", newline="\n")
+    return True
+
+
+def _apply_sidebar_layout_fallback_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "index.css"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    marker = "UNSLOTH_SIDEBAR_LAYOUT_FALLBACK_SHIM_V2"
+    if marker in text:
+        return False
+    anchor = "\t/* Settings dialog: no shadow in dark mode. */\n"
+    css = (
+        f"\t/* {marker}: fallback for Tailwind custom-property width shorthand. */\n"
+        "\t[data-slot=\"sidebar-wrapper\"] > [data-slot=\"sidebar\"][data-side=\"left\"] {\n"
+        "\t\twidth: var(--sidebar-width);\n"
+        "\t\tmin-width: var(--sidebar-width);\n"
+        "\t\tflex-basis: var(--sidebar-width);\n"
+        "\t}\n"
+        "\t[data-slot=\"sidebar-wrapper\"] > [data-slot=\"sidebar\"][data-side=\"left\"][data-collapsible=\"icon\"] {\n"
+        "\t\twidth: var(--sidebar-width-icon);\n"
+        "\t\tmin-width: var(--sidebar-width-icon);\n"
+        "\t\tflex-basis: var(--sidebar-width-icon);\n"
+        "\t}\n"
+        "\t[data-slot=\"sidebar-wrapper\"] > [data-slot=\"sidebar\"][data-side=\"left\"][data-collapsible=\"offcanvas\"] {\n"
+        "\t\twidth: 0;\n"
+        "\t\tmin-width: 0;\n"
+        "\t\tflex-basis: 0;\n"
+        "\t}\n"
+        "\t[data-slot=\"sidebar\"][data-side=\"left\"] > [data-slot=\"sidebar-gap\"] {\n"
+        "\t\twidth: 100%;\n"
+        "\t\tmin-height: 100%;\n"
+        "\t}\n"
+        "\t[data-slot=\"sidebar\"][data-side=\"left\"] > [data-slot=\"sidebar-container\"] {\n"
+        "\t\twidth: 100%;\n"
+        "\t\tmax-width: 100%;\n"
+        "\t\tz-index: 30;\n"
+        "\t}\n\n"
+    )
+    new_text = _replace_once(text, anchor, css + anchor, target, "sidebar layout fallback CSS")
+    target.write_text(new_text, encoding="utf-8", newline="\n")
+    return True
+
+
+def _apply_chat_layout_fallback_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "index.css"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    marker = "UNSLOTH_CHAT_LAYOUT_FALLBACK_SHIM"
+    if marker in text:
+        return False
+    anchor = "\t/* Settings dialog: no shadow in dark mode. */\n"
+    css = (
+        f"\t/* {marker}: fallback for Tailwind custom-property max-width shorthand. */\n"
+        "\t.aui-thread-root {\n"
+        "\t\t--thread-max-width: 48rem;\n"
+        "\t\t--thread-content-max-width: calc(var(--thread-max-width) - 1.5rem);\n"
+        "\t}\n"
+        "\t.max-w-\\(--thread-max-width\\) {\n"
+        "\t\tmax-width: var(--thread-max-width);\n"
+        "\t}\n"
+        "\t.max-w-\\(--thread-content-max-width\\) {\n"
+        "\t\tmax-width: var(--thread-content-max-width);\n"
+        "\t}\n"
+        "\t.aui-thread-root .composer-footer-note {\n"
+        "\t\tmax-width: var(--thread-max-width);\n"
+        "\t\tmargin-left: auto;\n"
+        "\t\tmargin-right: auto;\n"
+        "\t}\n\n"
+    )
+    new_text = _replace_once(text, anchor, css + anchor, target, "chat layout fallback CSS")
+    target.write_text(new_text, encoding="utf-8", newline="\n")
+    return True
+
+
 def _apply_asr_fallback_backend_schema_shim(studio_home: Path) -> bool:
     target = studio_package_dir(studio_home) / "backend" / "models" / "inference.py"
     if not target.exists():
@@ -1810,6 +1940,15 @@ def _apply_asr_fallback_backend_route_shim(studio_home: Path) -> bool:
         raise FileNotFoundError(f"Missing {target}")
     text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
     changed = False
+    if "from pydantic import BaseModel" not in text:
+        text = _replace_once(
+            text,
+            "from fastapi.responses import StreamingResponse, JSONResponse, Response\n",
+            "from fastapi.responses import StreamingResponse, JSONResponse, Response\nfrom pydantic import BaseModel\n",
+            target,
+            "ASR frontend transcription endpoint Pydantic import",
+        )
+        changed = True
     if ASR_FALLBACK_SHIM_MARKER not in text:
         helper = f'''
 
@@ -1930,6 +2069,35 @@ def _gguf_native_audio_input_available(llama_backend) -> bool:
             native_helper + "def _prepare_audio_for_asr_wav(b64: str) -> str:\n",
             target,
             "ASR fallback native GGUF audio helper anchor",
+        )
+        changed = True
+
+    if "class AudioTranscribeRequest(BaseModel)" not in text:
+        transcribe_route = f'''
+
+class AudioTranscribeRequest(BaseModel):
+    audio_base64: str
+
+
+class AudioTranscribeResponse(BaseModel):
+    text: str
+
+
+@router.post("/audio/transcribe", response_model = AudioTranscribeResponse)
+async def transcribe_audio(payload: AudioTranscribeRequest):
+    # {ASR_FALLBACK_SHIM_MARKER}: frontend pre-transcription for durable chat history.
+    if not payload.audio_base64:
+        raise _reject(400, "audio_base64 is required.")
+    if len(payload.audio_base64) > _MAX_AUDIO_B64_CHARS:
+        raise _reject(413, "Audio file is too large (max ~25 MB).")
+    return AudioTranscribeResponse(text = await _transcribe_audio_fallback(payload.audio_base64))
+'''
+        text = _replace_once(
+            text,
+            '\n@router.post("/audio/generate")\n',
+            transcribe_route + '\n@router.post("/audio/generate")\n',
+            target,
+            "ASR frontend transcription endpoint",
         )
         changed = True
 
@@ -2089,6 +2257,31 @@ def _apply_asr_fallback_frontend_shim(frontend: Path) -> bool:
         api_types.write_text(text, encoding="utf-8", newline="\n")
         changed = True
 
+    chat_api = frontend / "src" / "features" / "chat" / "api" / "chat-api.ts"
+    text = chat_api.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if "transcribeVoiceAudio" not in text:
+        helper = """
+
+export async function transcribeVoiceAudio(audioBase64: string): Promise<string> {
+  const response = await authFetch("/api/inference/audio/transcribe", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ audio_base64: audioBase64 }),
+  });
+  const data = await parseJsonOrThrow<{ text?: string }>(response);
+  return (data.text ?? "").trim();
+}
+"""
+        text = _replace_once(
+            text,
+            "\nexport async function getInferenceStatus(): Promise<InferenceStatusResponse> {\n",
+            helper + "\nexport async function getInferenceStatus(): Promise<InferenceStatusResponse> {\n",
+            chat_api,
+            "voice transcription frontend API helper",
+        )
+        chat_api.write_text(text, encoding="utf-8", newline="\n")
+        changed = True
+
     model_runtime = frontend / "src" / "features" / "chat" / "hooks" / "use-chat-model-runtime.ts"
     text = model_runtime.read_text(encoding="utf-8").replace("\r\n", "\n")
     replacements = [
@@ -2180,6 +2373,15 @@ def _apply_asr_fallback_frontend_shim(frontend: Path) -> bool:
 
     audio_adapter = frontend / "src" / "features" / "chat" / "audio-attachment-adapter.ts"
     text = audio_adapter.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if 'import { transcribeVoiceAudio } from "./api/chat-api";\n' not in text:
+        text = _replace_once(
+            text,
+            'import { toast } from "sonner";\n',
+            'import { toast } from "sonner";\nimport { transcribeVoiceAudio } from "./api/chat-api";\nimport { buildVoiceMessageText } from "./native-audio-recorder";\n',
+            audio_adapter,
+            "audio adapter transcription imports",
+        )
+        changed = True
     replacements = [
         (
             "    } else if (!activeModel?.hasAudioInput) {\n",
@@ -2194,6 +2396,46 @@ def _apply_asr_fallback_frontend_shim(frontend: Path) -> bool:
         if new in text:
             continue
         text = _replace_once(text, old, new, audio_adapter, "audio adapter voice gate")
+        changed = True
+    old_send = """  async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
+    try {
+      const base64 = await fileToBase64(attachment.file);
+      // Backend takes raw base64; format only satisfies the part type.
+      const format = attachment.contentType === "audio/mpeg" ? "mp3" : "wav";
+      return {
+        id: attachment.id,
+        type: "file",
+        name: attachment.name,
+        contentType: attachment.contentType,
+        content: [{ type: "audio", audio: { data: base64, format } }],
+        status: { type: "complete" },
+      };
+    } finally {
+      this.attachmentIds.delete(attachment.id);
+    }
+  }
+"""
+    new_send = """  async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
+    try {
+      const base64 = await fileToBase64(attachment.file);
+      const transcript = await transcribeVoiceAudio(base64);
+      const promptText = useChatRuntimeStore.getState().voiceMessagePromptText;
+      const text = buildVoiceMessageText({ transcript, promptText });
+      return {
+        id: attachment.id,
+        type: "file",
+        name: attachment.name,
+        contentType: "text/plain",
+        content: [{ type: "text", text }],
+        status: { type: "complete" },
+      };
+    } finally {
+      this.attachmentIds.delete(attachment.id);
+    }
+  }
+"""
+    if old_send in text:
+        text = text.replace(old_send, new_send, 1)
         changed = True
     if changed:
         audio_adapter.write_text(text, encoding="utf-8", newline="\n")
@@ -2284,27 +2526,47 @@ def _apply_native_audio_backend_settings_shim(studio_home: Path) -> bool:
     if not target.exists():
         raise FileNotFoundError(f"Missing {target}")
     text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
-    if "voiceRecordingMaxSeconds" in text:
-        return False
-    old = "    toolCallTimeout: Optional[int] = Field(default = None, ge = 1)\n"
-    new = (
-        old
-        + "    # UNSLOTH_NATIVE_AUDIO_MIC_SHIM: browser mic recorder duration cap.\n"
-        + "    voiceRecordingMaxSeconds: Optional[int] = Field(default = None, ge = 5, le = 600)\n"
-    )
-    target.write_text(_replace_once(text, old, new, target, "chat settings schema"), encoding="utf-8", newline="\n")
-    return True
+    changed = False
+    if "voiceRecordingMaxSeconds" not in text:
+        old = "    toolCallTimeout: Optional[int] = Field(default = None, ge = 1)\n"
+        new = (
+            old
+            + "    # UNSLOTH_NATIVE_AUDIO_MIC_SHIM: browser mic recorder duration cap.\n"
+            + "    voiceRecordingMaxSeconds: Optional[int] = Field(default = None, ge = 5, le = 600)\n"
+        )
+        text = _replace_once(text, old, new, target, "chat settings schema")
+        changed = True
+    if "voiceMessagePromptText" not in text:
+        old = "    voiceRecordingMaxSeconds: Optional[int] = Field(default = None, ge = 5, le = 600)\n"
+        new = (
+            old
+            + "    # UNSLOTH_NATIVE_AUDIO_MIC_SHIM: optional text sent with voice turns.\n"
+            + "    voiceMessagePromptText: Optional[str] = Field(default = None, max_length = 2000)\n"
+        )
+        text = _replace_once(text, old, new, target, "chat settings voice prompt schema")
+        changed = True
+    if changed:
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return changed
 
 
 def _apply_native_audio_frontend_api_shim(frontend: Path) -> bool:
     target = frontend / "src" / "features" / "chat" / "api" / "chat-settings-api.ts"
     text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
-    if "voiceRecordingMaxSeconds?: number;" in text:
-        return False
-    old = "  toolCallTimeout?: number;\n"
-    new = old + "  voiceRecordingMaxSeconds?: number;\n"
-    target.write_text(_replace_once(text, old, new, target, "chat settings API type"), encoding="utf-8", newline="\n")
-    return True
+    changed = False
+    if "voiceRecordingMaxSeconds?: number;" not in text:
+        old = "  toolCallTimeout?: number;\n"
+        new = old + "  voiceRecordingMaxSeconds?: number;\n"
+        text = _replace_once(text, old, new, target, "chat settings API type")
+        changed = True
+    if "voiceMessagePromptText?: string;" not in text:
+        old = "  voiceRecordingMaxSeconds?: number;\n"
+        new = old + "  voiceMessagePromptText?: string;\n"
+        text = _replace_once(text, old, new, target, "chat settings voice prompt API type")
+        changed = True
+    if changed:
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return changed
 
 
 def _apply_native_audio_settings_storage_shim(frontend: Path) -> bool:
@@ -2336,6 +2598,32 @@ def _apply_native_audio_settings_storage_shim(frontend: Path) -> bool:
             + "}\n"
         )
         text = _replace_once(text, old, new, target, "sanitizeInt helper")
+        changed = True
+    if "function sanitizeString" not in text:
+        old = (
+            "function sanitizeIntRange(\n"
+            "  value: unknown,\n"
+            "  min: number,\n"
+            "  max: number,\n"
+            "): number | undefined {\n"
+            "  return typeof value === \"number\" &&\n"
+            "    Number.isInteger(value) &&\n"
+            "    value >= min &&\n"
+            "    value <= max\n"
+            "    ? value\n"
+            "    : undefined;\n"
+            "}\n"
+        )
+        new = (
+            old
+            + "\n"
+            + "function sanitizeString(value: unknown, maxLength: number): string | undefined {\n"
+            + "  return typeof value === \"string\" && value.length <= maxLength\n"
+            + "    ? value\n"
+            + "    : undefined;\n"
+            + "}\n"
+        )
+        text = _replace_once(text, old, new, target, "sanitizeString helper")
         changed = True
     if "voiceRecordingMaxSeconds" not in text:
         text = _replace_once(
@@ -2373,6 +2661,43 @@ def _apply_native_audio_settings_storage_shim(frontend: Path) -> bool:
             ),
             target,
             "empty settings voice field",
+        )
+        changed = True
+    if "voiceMessagePromptText" not in text:
+        text = _replace_once(
+            text,
+            "  const toolCallTimeout = sanitizeInt(value.toolCallTimeout, 1);\n",
+            (
+                "  const toolCallTimeout = sanitizeInt(value.toolCallTimeout, 1);\n"
+                "  const voiceMessagePromptText = sanitizeString(\n"
+                "    value.voiceMessagePromptText,\n"
+                "    2000,\n"
+                "  );\n"
+            ),
+            target,
+            "sanitize chat settings voice prompt field",
+        )
+        text = _replace_once(
+            text,
+            "  if (toolCallTimeout !== undefined) settings.toolCallTimeout = toolCallTimeout;\n",
+            (
+                "  if (toolCallTimeout !== undefined) settings.toolCallTimeout = toolCallTimeout;\n"
+                "  if (voiceMessagePromptText !== undefined) {\n"
+                "    settings.voiceMessagePromptText = voiceMessagePromptText;\n"
+                "  }\n"
+            ),
+            target,
+            "persist voice prompt setting",
+        )
+        text = _replace_once(
+            text,
+            "    settings.toolCallTimeout === undefined &&\n",
+            (
+                "    settings.toolCallTimeout === undefined &&\n"
+                "    settings.voiceMessagePromptText === undefined &&\n"
+            ),
+            target,
+            "empty settings voice prompt field",
         )
         changed = True
     if changed:
@@ -2437,6 +2762,68 @@ def _apply_native_audio_runtime_store_shim(frontend: Path) -> bool:
         ),
     ]
     for old, new, label in replacements:
+        if (
+            label in {
+                "store field",
+                "store setter type",
+                "scalar setting key",
+                "scalar setting list",
+                "default voice setting",
+                "voice setter implementation",
+            }
+            and "voiceRecordingMaxSeconds" in text
+        ):
+            continue
+        if new in text:
+            continue
+        text = _replace_once(text, old, new, target, label)
+        changed = True
+    prompt_replacements = [
+        (
+            "  toolCallTimeout: number;\n  voiceRecordingMaxSeconds: number;\n",
+            "  toolCallTimeout: number;\n  voiceRecordingMaxSeconds: number;\n  voiceMessagePromptText: string;\n",
+            "store voice prompt field",
+        ),
+        (
+            "  setToolCallTimeout: (value: number) => void;\n  setVoiceRecordingMaxSeconds: (value: number) => void;\n",
+            "  setToolCallTimeout: (value: number) => void;\n  setVoiceRecordingMaxSeconds: (value: number) => void;\n  setVoiceMessagePromptText: (value: string) => void;\n",
+            "store voice prompt setter type",
+        ),
+        (
+            '  | "toolCallTimeout"\n  | "voiceRecordingMaxSeconds";\n',
+            '  | "toolCallTimeout"\n  | "voiceRecordingMaxSeconds"\n  | "voiceMessagePromptText";\n',
+            "scalar voice prompt setting key",
+        ),
+        (
+            '  "toolCallTimeout",\n  "voiceRecordingMaxSeconds",\n',
+            '  "toolCallTimeout",\n  "voiceRecordingMaxSeconds",\n  "voiceMessagePromptText",\n',
+            "scalar voice prompt setting list",
+        ),
+        (
+            "  toolCallTimeout: 5,\n  voiceRecordingMaxSeconds: 120,\n",
+            "  toolCallTimeout: 5,\n  voiceRecordingMaxSeconds: 120,\n  voiceMessagePromptText: \"\",\n",
+            "default voice prompt setting",
+        ),
+        (
+            "      return { voiceRecordingMaxSeconds: next };\n    }),\n",
+            (
+                "      return { voiceRecordingMaxSeconds: next };\n"
+                "    }),\n"
+                "  setVoiceMessagePromptText: (voiceMessagePromptText) =>\n"
+                "    set((state) => {\n"
+                "      const next = voiceMessagePromptText.slice(0, 2000);\n"
+                "      setScalarSettingVersion(\n"
+                "        \"voiceMessagePromptText\",\n"
+                "        next,\n"
+                "        state.voiceMessagePromptText,\n"
+                "      );\n"
+                "      return { voiceMessagePromptText: next };\n"
+                "    }),\n"
+            ),
+            "voice prompt setter implementation",
+        ),
+    ]
+    for old, new, label in prompt_replacements:
         if new in text:
             continue
         text = _replace_once(text, old, new, target, label)
@@ -2450,6 +2837,122 @@ def _apply_native_audio_settings_panel_shim(frontend: Path) -> bool:
     target = frontend / "src" / "features" / "chat" / "chat-settings-sheet.tsx"
     text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
     changed = False
+    if "RUN_SETTINGS_PANEL_WIDTH_STORAGE_KEY" not in text:
+        old = "  const isMobile = useIsMobile();\n"
+        new = """  const isMobile = useIsMobile();
+  const RUN_SETTINGS_PANEL_WIDTH_STORAGE_KEY = "unsloth:run-settings-panel-width";
+  const DEFAULT_RUN_SETTINGS_PANEL_WIDTH = 360;
+  const MIN_RUN_SETTINGS_PANEL_WIDTH = 320;
+  const MAX_RUN_SETTINGS_PANEL_WIDTH = 720;
+  const clampRunSettingsPanelWidth = useCallback((value: number) => {
+    const viewportLimit =
+      typeof window === "undefined"
+        ? MAX_RUN_SETTINGS_PANEL_WIDTH
+        : Math.max(
+            MIN_RUN_SETTINGS_PANEL_WIDTH,
+            Math.min(MAX_RUN_SETTINGS_PANEL_WIDTH, window.innerWidth - 480),
+          );
+    return Math.max(
+      MIN_RUN_SETTINGS_PANEL_WIDTH,
+      Math.min(viewportLimit, Math.round(value)),
+    );
+  }, []);
+  const [runSettingsPanelWidth, setRunSettingsPanelWidth] = useState(() => {
+    if (typeof window === "undefined") return DEFAULT_RUN_SETTINGS_PANEL_WIDTH;
+    const saved = Number.parseInt(
+      window.localStorage.getItem(RUN_SETTINGS_PANEL_WIDTH_STORAGE_KEY) ?? "",
+      10,
+    );
+    return clampRunSettingsPanelWidth(
+      Number.isFinite(saved) ? saved : DEFAULT_RUN_SETTINGS_PANEL_WIDTH,
+    );
+  });
+  const runSettingsPanelWidthRef = useRef(runSettingsPanelWidth);
+  useEffect(() => {
+    runSettingsPanelWidthRef.current = runSettingsPanelWidth;
+  }, [runSettingsPanelWidth]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onResize = () => {
+      setRunSettingsPanelWidth((current) =>
+        clampRunSettingsPanelWidth(current),
+      );
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [clampRunSettingsPanelWidth]);
+"""
+        text = _replace_once(text, old, new, target, "run settings resizable panel state")
+        changed = True
+    old_run_settings_width = '''    <aside
+      className={`relative z-50 shrink-0 h-full overflow-hidden bg-panel-surface text-panel-surface-fg font-heading ${open ? "w-[17rem] border-l border-sidebar-border" : "w-0"}`}
+    >
+'''
+    new_run_settings_width = '''    <aside
+      className={`relative z-50 shrink-0 min-w-0 h-full overflow-hidden bg-panel-surface text-panel-surface-fg font-heading ${open ? "border-l border-sidebar-border" : ""}`}
+      style={{
+        width: open ? `${runSettingsPanelWidth}px` : "0rem",
+        flexBasis: open ? `${runSettingsPanelWidth}px` : "0rem",
+        maxWidth: open ? `${runSettingsPanelWidth}px` : "0rem",
+      }}
+    >
+      {open ? (
+        <div
+          role="separator"
+          aria-label="Resize run settings panel"
+          aria-orientation="vertical"
+          aria-valuemin={MIN_RUN_SETTINGS_PANEL_WIDTH}
+          aria-valuemax={MAX_RUN_SETTINGS_PANEL_WIDTH}
+          aria-valuenow={runSettingsPanelWidth}
+          className="absolute left-0 top-0 z-20 h-full w-2 cursor-col-resize touch-none border-l border-transparent hover:border-primary/50"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            const startX = event.clientX;
+            const startWidth = runSettingsPanelWidthRef.current;
+            const previousCursor = document.body.style.cursor;
+            const previousUserSelect = document.body.style.userSelect;
+            document.body.style.cursor = "col-resize";
+            document.body.style.userSelect = "none";
+            const onPointerMove = (moveEvent: PointerEvent) => {
+              const nextWidth = clampRunSettingsPanelWidth(
+                startWidth + startX - moveEvent.clientX,
+              );
+              runSettingsPanelWidthRef.current = nextWidth;
+              setRunSettingsPanelWidth(nextWidth);
+            };
+            const stopResize = () => {
+              document.removeEventListener("pointermove", onPointerMove);
+              document.removeEventListener("pointerup", stopResize);
+              document.removeEventListener("pointercancel", stopResize);
+              document.body.style.cursor = previousCursor;
+              document.body.style.userSelect = previousUserSelect;
+              window.localStorage.setItem(
+                RUN_SETTINGS_PANEL_WIDTH_STORAGE_KEY,
+                String(runSettingsPanelWidthRef.current),
+              );
+            };
+            document.addEventListener("pointermove", onPointerMove);
+            document.addEventListener("pointerup", stopResize);
+            document.addEventListener("pointercancel", stopResize);
+          }}
+        />
+      ) : null}
+'''
+    if old_run_settings_width in text:
+        text = text.replace(old_run_settings_width, new_run_settings_width, 1)
+        changed = True
+    old_fixed_run_settings_width = '''    <aside
+      className={`relative z-50 shrink-0 min-w-0 h-full overflow-hidden bg-panel-surface text-panel-surface-fg font-heading ${open ? "border-l border-sidebar-border" : ""}`}
+      style={{
+        width: open ? "17rem" : "0rem",
+        flexBasis: open ? "17rem" : "0rem",
+        maxWidth: open ? "17rem" : "0rem",
+      }}
+    >
+'''
+    if old_fixed_run_settings_width in text:
+        text = text.replace(old_fixed_run_settings_width, new_run_settings_width, 1)
+        changed = True
     if "VoiceRecordingLimitSlider" not in text:
         old = "        {!isExternalModel ? (\n          <CollapsibleSection label=\"Tools\">\n"
         new = (
@@ -2457,6 +2960,7 @@ def _apply_native_audio_settings_panel_shim(frontend: Path) -> bool:
             "          <CollapsibleSection label=\"Voice\">\n"
             "            <div className=\"flex flex-col gap-5 pt-1\">\n"
             "              <VoiceRecordingLimitSlider />\n"
+            "              <VoiceMessagePromptTextArea />\n"
             "            </div>\n"
             "          </CollapsibleSection>\n"
             "        ) : null}\n\n"
@@ -2500,6 +3004,45 @@ function VoiceRecordingLimitSlider() {
         if old_info in text and voice_info not in text:
             text = text.replace(old_info, voice_info, 1)
             changed = True
+    if "              <VoiceMessagePromptTextArea />" not in text:
+        text = _replace_once(
+            text,
+            "              <VoiceRecordingLimitSlider />\n",
+            "              <VoiceRecordingLimitSlider />\n              <VoiceMessagePromptTextArea />\n",
+            target,
+            "voice prompt settings control",
+        )
+        changed = True
+    if "function VoiceMessagePromptTextArea()" not in text:
+        fn = """
+
+function VoiceMessagePromptTextArea() {
+  const promptText = useChatRuntimeStore((s) => s.voiceMessagePromptText);
+  const setPromptText = useChatRuntimeStore((s) => s.setVoiceMessagePromptText);
+
+  return (
+    <div className="space-y-2">
+      <div className="space-y-1">
+        <div className="text-xs font-medium">Voice Message Prompt</div>
+        <p className="text-[11px] leading-4 text-muted-foreground">
+          Optional text sent along with voice turns. Leave blank to send only the
+          transcript or native audio.
+        </p>
+      </div>
+      <Textarea
+        value={promptText}
+        onChange={(event) => setPromptText(event.target.value)}
+        placeholder="Optional instruction for voice-only turns..."
+        fieldSizing="fixed"
+        className="min-h-20 resize-y text-xs leading-5"
+        rows={3}
+      />
+    </div>
+  );
+}
+"""
+        text = _replace_once(text, "\nfunction ToolCallTimeoutSlider() {\n", fn + "\nfunction ToolCallTimeoutSlider() {\n", target, "voice prompt settings function")
+        changed = True
     if changed:
         target.write_text(text, encoding="utf-8", newline="\n")
     return changed
@@ -2515,7 +3058,8 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
             'import { sentAudioNames } from "@/features/chat/api/chat-adapter";\n',
             (
                 'import { sentAudioNames } from "@/features/chat/api/chat-adapter";\n'
-                'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n'
+                'import { transcribeVoiceAudio } from "@/features/chat/api/chat-api";\n'
+                'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n'
             ),
             target,
             "native recorder import",
@@ -2528,7 +3072,27 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
     ):
         text = text.replace(
             'import { useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n',
+            'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n',
+            1,
+        )
+        changed = True
+    if 'import { transcribeVoiceAudio } from "@/features/chat/api/chat-api";\n' not in text:
+        text = _replace_once(
+            text,
+            'import { sentAudioNames } from "@/features/chat/api/chat-adapter";\n',
+            'import { sentAudioNames } from "@/features/chat/api/chat-adapter";\nimport { transcribeVoiceAudio } from "@/features/chat/api/chat-api";\n',
+            target,
+            "thread transcription API import",
+        )
+        changed = True
+    if (
+        'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n'
+        not in text
+        and 'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n' in text
+    ):
+        text = text.replace(
             'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n',
+            'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n',
             1,
         )
         changed = True
@@ -2557,6 +3121,7 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
         )
         new = (
             "  const isQueueRunning = Boolean(queueEntry);\n"
+            "  const aui = useAui();\n"
             "  const voiceRecordingMaxSeconds = useChatRuntimeStore(\n"
             "    (s) => s.voiceRecordingMaxSeconds,\n"
             "  );\n"
@@ -2580,9 +3145,34 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
             "    return `${label} does not expose audio input. Load a model with an audio-capable mmproj.`;\n"
             "  });\n"
             "  const audioInputEnabled = audioInputUnavailableReason === null;\n"
-            "  const recorder = useNativeAudioRecorder((base64, name) => {\n"
+            "  const recorder = useNativeAudioRecorder(async (base64, name) => {\n"
             "    clearPendingAudio();\n"
-            "    setPendingAudio(base64, name);\n"
+    "    if (activeVoiceModel?.hasAudioInput) {\n"
+    "      setPendingAudio(base64, name);\n"
+    "      const currentText = aui.composer().getState().text;\n"
+    "      let transcript: string | undefined;\n"
+    "      try {\n"
+    "        transcript = await transcribeVoiceAudio(base64);\n"
+    "      } catch (error) {\n"
+    "        console.warn(\"Voice transcription for chat history failed:\", error);\n"
+    "        toast.error(\"Voice transcript failed; sending audio without saved transcript.\");\n"
+    "      }\n"
+    "      const nextText = buildVoiceMessageText({\n"
+    "        existingText: currentText,\n"
+    "        transcript,\n"
+    "        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,\n"
+    "      });\n"
+            "      if (nextText && nextText !== currentText) aui.composer().setText(nextText);\n"
+            "      return;\n"
+            "    }\n"
+            "    const transcript = await transcribeVoiceAudio(base64);\n"
+            "    const currentText = aui.composer().getState().text;\n"
+            "    const nextText = buildVoiceMessageText({\n"
+            "      existingText: currentText,\n"
+            "      transcript,\n"
+            "      promptText: useChatRuntimeStore.getState().voiceMessagePromptText,\n"
+            "    });\n"
+            "    if (nextText) aui.composer().setText(nextText);\n"
             "  }, effectiveVoiceRecordingMaxSeconds);\n"
             "  const recorderBusy = recorder.status === \"recording\" || recorder.status === \"processing\";\n"
             "  return (\n"
@@ -2598,6 +3188,19 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
     )
     if legacy_audio_gate in text:
         text = text.replace(legacy_audio_gate, "", 1)
+        changed = True
+    if (
+        "  const isQueueRunning = Boolean(queueEntry);\n"
+        "  const voiceRecordingMaxSeconds = useChatRuntimeStore(\n" in text
+    ):
+        text = text.replace(
+            "  const isQueueRunning = Boolean(queueEntry);\n"
+            "  const voiceRecordingMaxSeconds = useChatRuntimeStore(\n",
+            "  const isQueueRunning = Boolean(queueEntry);\n"
+            "  const aui = useAui();\n"
+            "  const voiceRecordingMaxSeconds = useChatRuntimeStore(\n",
+            1,
+        )
         changed = True
     if (
         "const activeVoiceModel = useChatRuntimeStore" not in text
@@ -2650,6 +3253,77 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
             target,
             "thread audio support state",
         )
+        changed = True
+    old_recorder_callback = """  const recorder = useNativeAudioRecorder((base64, name) => {
+    clearPendingAudio();
+    setPendingAudio(base64, name);
+  }, effectiveVoiceRecordingMaxSeconds);
+"""
+    new_recorder_callback = """  const recorder = useNativeAudioRecorder(async (base64, name) => {
+    clearPendingAudio();
+    if (activeVoiceModel?.hasAudioInput) {
+      setPendingAudio(base64, name);
+      const currentText = aui.composer().getState().text;
+      let transcript: string | undefined;
+      try {
+        transcript = await transcribeVoiceAudio(base64);
+      } catch (error) {
+        console.warn("Voice transcription for chat history failed:", error);
+        toast.error("Voice transcript failed; sending audio without saved transcript.");
+      }
+      const nextText = buildVoiceMessageText({
+        existingText: currentText,
+        transcript,
+        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+      });
+      if (nextText && nextText !== currentText) aui.composer().setText(nextText);
+      return;
+    }
+    const transcript = await transcribeVoiceAudio(base64);
+    const currentText = aui.composer().getState().text;
+    const nextText = buildVoiceMessageText({
+      existingText: currentText,
+      transcript,
+      promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+    });
+    if (nextText) aui.composer().setText(nextText);
+  }, effectiveVoiceRecordingMaxSeconds);
+"""
+    if old_recorder_callback in text:
+        text = text.replace(old_recorder_callback, new_recorder_callback, 1)
+        changed = True
+    old_native_recorder_history = """    if (activeVoiceModel?.hasAudioInput) {
+      setPendingAudio(base64, name);
+      const currentText = aui.composer().getState().text;
+      const nextText = buildVoiceMessageText({
+        existingText: currentText,
+        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+      });
+      if (nextText && nextText !== currentText) aui.composer().setText(nextText);
+      return;
+    }
+"""
+    new_native_recorder_history = """    if (activeVoiceModel?.hasAudioInput) {
+      setPendingAudio(base64, name);
+      const currentText = aui.composer().getState().text;
+      let transcript: string | undefined;
+      try {
+        transcript = await transcribeVoiceAudio(base64);
+      } catch (error) {
+        console.warn("Voice transcription for chat history failed:", error);
+        toast.error("Voice transcript failed; sending audio without saved transcript.");
+      }
+      const nextText = buildVoiceMessageText({
+        existingText: currentText,
+        transcript,
+        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+      });
+      if (nextText && nextText !== currentText) aui.composer().setText(nextText);
+      return;
+    }
+"""
+    if old_native_recorder_history in text:
+        text = text.replace(old_native_recorder_history, new_native_recorder_history, 1)
         changed = True
     old_dictation = (
         "      <ComposerPrimitive.If dictation={false}>\n"
@@ -2779,13 +3453,49 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
                 "    if (!hasPendingAudio || composerText.trim().length > 0 || hasAttachments) {\n"
                 "      return;\n"
                 "    }\n"
+                "    const voicePrompt = useChatRuntimeStore.getState().voiceMessagePromptText.trim();\n"
+                "    if (!voicePrompt) {\n"
+                "      return;\n"
+                "    }\n"
                 "    flushResourcesSync(() => {\n"
-                "      aui.composer().setText(\"Please respond to the attached voice message.\");\n"
+                "      aui.composer().setText(voicePrompt);\n"
                 "    });\n"
                 "  }, [aui, composerText, hasAttachments, hasPendingAudio]);\n"
             ),
             target,
             "thread audio-only composer text helper",
+        )
+        changed = True
+    old_ensure = """  const ensureAudioOnlyComposerText = useCallback(() => {
+    if (!hasPendingAudio || composerText.trim().length > 0 || hasAttachments) {
+      return;
+    }
+    flushResourcesSync(() => {
+      aui.composer().setText("Please respond to the attached voice message.");
+    });
+  }, [aui, composerText, hasAttachments, hasPendingAudio]);
+"""
+    new_ensure = """  const ensureAudioOnlyComposerText = useCallback(() => {
+    if (!hasPendingAudio || composerText.trim().length > 0 || hasAttachments) {
+      return;
+    }
+    const voicePrompt = useChatRuntimeStore.getState().voiceMessagePromptText.trim();
+    if (!voicePrompt) {
+      return;
+    }
+    flushResourcesSync(() => {
+      aui.composer().setText(voicePrompt);
+    });
+  }, [aui, composerText, hasAttachments, hasPendingAudio]);
+"""
+    if old_ensure in text:
+        text = text.replace(old_ensure, new_ensure, 1)
+        changed = True
+    if "if (text.trim().length > 0 || attachments.length > 0) {\n      aui.composer().send();" in text:
+        text = text.replace(
+            "if (text.trim().length > 0 || attachments.length > 0) {\n      aui.composer().send();",
+            "if (text.trim().length > 0 || attachments.length > 0 || useChatRuntimeStore.getState().pendingAudioBase64) {\n      aui.composer().send();",
+            1,
         )
         changed = True
     if "      ensureAudioOnlyComposerText();\n      if (indexingActive && !overlay) {\n" not in text:
@@ -2819,7 +3529,7 @@ def _apply_native_audio_shared_composer_shim(frontend: Path) -> bool:
             'import { McpComposerButton } from "./mcp-composer-button";\n',
             (
                 'import { McpComposerButton } from "./mcp-composer-button";\n'
-                'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n'
+                'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n'
             ),
             target,
             "shared recorder import",
@@ -2832,10 +3542,29 @@ def _apply_native_audio_shared_composer_shim(frontend: Path) -> bool:
     ):
         text = text.replace(
             'import { useNativeAudioRecorder } from "./native-audio-recorder";\n',
-            'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n',
+            'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n',
             1,
         )
         changed = True
+    if (
+        'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n'
+        not in text
+        and 'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n' in text
+    ):
+        text = text.replace(
+            'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n',
+            'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n',
+            1,
+        )
+        changed = True
+    if 'import { loadModel, transcribeVoiceAudio, validateModel } from "./api/chat-api";\n' not in text:
+        if 'import { loadModel, validateModel } from "./api/chat-api";\n' in text:
+            text = text.replace(
+                'import { loadModel, validateModel } from "./api/chat-api";\n',
+                'import { loadModel, transcribeVoiceAudio, validateModel } from "./api/chat-api";\n',
+                1,
+            )
+            changed = True
     if 'import { Spinner } from "@/components/ui/spinner";' not in text:
         text = _replace_once(
             text,
@@ -2863,9 +3592,32 @@ def _apply_native_audio_shared_composer_shim(frontend: Path) -> bool:
             + "    voiceRecordingMaxSeconds,\n"
             + "    activeModel,\n"
             + "  );\n"
-            + "  const nativeRecorder = useNativeAudioRecorder((base64, name) => {\n"
-            + "    setPendingAudio({ name, base64 });\n"
-            + "    setPendingAudioStore(base64, name);\n"
+            + "  const nativeRecorder = useNativeAudioRecorder(async (base64, name) => {\n"
+            + "    if (activeModel?.hasAudioInput) {\n"
+            + "      setPendingAudio({ name, base64 });\n"
+            + "      setPendingAudioStore(base64, name);\n"
+            + "      let transcript: string | undefined;\n"
+            + "      try {\n"
+            + "        transcript = await transcribeVoiceAudio(base64);\n"
+            + "      } catch (error) {\n"
+            + "        console.warn(\"Voice transcription for chat history failed:\", error);\n"
+            + "        toast.error(\"Voice transcript failed; sending audio without saved transcript.\");\n"
+            + "      }\n"
+            + "      const nextText = buildVoiceMessageText({\n"
+            + "        existingText: text,\n"
+            + "        transcript,\n"
+            + "        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,\n"
+            + "      });\n"
+            + "      if (nextText && nextText !== text) setText(nextText);\n"
+            + "      return;\n"
+            + "    }\n"
+            + "    const transcript = await transcribeVoiceAudio(base64);\n"
+            + "    const nextText = buildVoiceMessageText({\n"
+            + "      existingText: text,\n"
+            + "      transcript,\n"
+            + "      promptText: useChatRuntimeStore.getState().voiceMessagePromptText,\n"
+            + "    });\n"
+            + "    if (nextText) setText(nextText);\n"
             + "  }, effectiveVoiceRecordingMaxSeconds);\n"
             + "  const nativeRecorderBusy =\n"
             + "    nativeRecorder.status === \"recording\" || nativeRecorder.status === \"processing\";\n"
@@ -2910,6 +3662,104 @@ def _apply_native_audio_shared_composer_shim(frontend: Path) -> bool:
         changed = True
     if "}, voiceRecordingMaxSeconds);" in text and "effectiveVoiceRecordingMaxSeconds" in text:
         text = text.replace("}, voiceRecordingMaxSeconds);", "}, effectiveVoiceRecordingMaxSeconds);", 1)
+        changed = True
+    old_shared_recorder_callback = """  const nativeRecorder = useNativeAudioRecorder((base64, name) => {
+    setPendingAudio({ name, base64 });
+    setPendingAudioStore(base64, name);
+  }, effectiveVoiceRecordingMaxSeconds);
+"""
+    new_shared_recorder_callback = """  const nativeRecorder = useNativeAudioRecorder(async (base64, name) => {
+    if (activeModel?.hasAudioInput) {
+      setPendingAudio({ name, base64 });
+      setPendingAudioStore(base64, name);
+      let transcript: string | undefined;
+      try {
+        transcript = await transcribeVoiceAudio(base64);
+      } catch (error) {
+        console.warn("Voice transcription for chat history failed:", error);
+        toast.error("Voice transcript failed; sending audio without saved transcript.");
+      }
+      const nextText = buildVoiceMessageText({
+        existingText: text,
+        transcript,
+        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+      });
+      if (nextText && nextText !== text) setText(nextText);
+      return;
+    }
+    const transcript = await transcribeVoiceAudio(base64);
+    const nextText = buildVoiceMessageText({
+      existingText: text,
+      transcript,
+      promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+    });
+    if (nextText) setText(nextText);
+  }, effectiveVoiceRecordingMaxSeconds);
+"""
+    if old_shared_recorder_callback in text:
+        text = text.replace(old_shared_recorder_callback, new_shared_recorder_callback, 1)
+        changed = True
+    old_shared_native_recorder_history = """    if (activeModel?.hasAudioInput) {
+      setPendingAudio({ name, base64 });
+      setPendingAudioStore(base64, name);
+      const nextText = buildVoiceMessageText({
+        existingText: text,
+        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+      });
+      if (nextText && nextText !== text) setText(nextText);
+      return;
+    }
+"""
+    new_shared_native_recorder_history = """    if (activeModel?.hasAudioInput) {
+      setPendingAudio({ name, base64 });
+      setPendingAudioStore(base64, name);
+      let transcript: string | undefined;
+      try {
+        transcript = await transcribeVoiceAudio(base64);
+      } catch (error) {
+        console.warn("Voice transcription for chat history failed:", error);
+        toast.error("Voice transcript failed; sending audio without saved transcript.");
+      }
+      const nextText = buildVoiceMessageText({
+        existingText: text,
+        transcript,
+        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+      });
+      if (nextText && nextText !== text) setText(nextText);
+      return;
+    }
+"""
+    if old_shared_native_recorder_history in text:
+        text = text.replace(old_shared_native_recorder_history, new_shared_native_recorder_history, 1)
+        changed = True
+    old_shared_audio_submit = """    if (pendingAudio) {
+      content.push({ type: "audio", audio: pendingAudio.base64 });
+    }
+    if (msg) {
+      content.push({ type: "text", text: msg });
+    }
+"""
+    new_shared_audio_submit = """    let messageText = msg;
+    if (pendingAudio && activeModel?.hasAudioInput) {
+      content.push({ type: "audio", audio: pendingAudio.base64 });
+      messageText = buildVoiceMessageText({
+        existingText: msg,
+        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+      });
+    } else if (pendingAudio) {
+      const transcript = await transcribeVoiceAudio(pendingAudio.base64);
+      messageText = buildVoiceMessageText({
+        existingText: msg,
+        transcript,
+        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+      });
+    }
+    if (messageText.trim()) {
+      content.push({ type: "text", text: messageText.trim() });
+    }
+"""
+    if old_shared_audio_submit in text:
+        text = text.replace(old_shared_audio_submit, new_shared_audio_submit, 1)
         changed = True
     if "  const nativeAudioUnavailableReason = !modelLoaded\n" not in text:
         text = _replace_once(
@@ -3038,6 +3888,9 @@ def apply_native_audio_mic_shim(studio_home: Path, *, build_frontend: bool = Fal
     changed |= _apply_native_audio_thread_shim(frontend)
     changed |= _apply_native_audio_shared_composer_shim(frontend)
     changed |= _apply_asr_fallback_frontend_shim(frontend)
+    changed |= _apply_sidebar_layout_fallback_shim(frontend)
+    changed |= _apply_chat_layout_fallback_shim(frontend)
+    changed |= _apply_settings_dialog_layout_shim(frontend)
     changed |= _apply_tailwind_safe_source_shim(frontend)
 
     if changed:
