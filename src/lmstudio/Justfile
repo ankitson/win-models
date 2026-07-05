@@ -1,0 +1,32 @@
+set shell := ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+
+root := module_directory() / "../.."
+model_root := env_var_or_default("WIN_MODELS_MODEL_ROOT", "E:\\root\\projects\\models")
+hf_cache := env_var_or_default("UNSLOTH_HF_CACHE", model_root)
+user_profile := env_var_or_default("USERPROFILE", "C:\\Users\\ankit")
+lmstudio_model_root := env_var_or_default("LMSTUDIO_MODEL_ROOT", user_profile / ".lmstudio" / "models")
+lmstudio_host := env_var_or_default("LMSTUDIO_HOST", "127.0.0.1")
+lmstudio_port := env_var_or_default("LMSTUDIO_PORT", "1234")
+lmstudio_context := env_var_or_default("LMSTUDIO_CONTEXT_LENGTH", env_var_or_default("UNSLOTH_CONTEXT_LENGTH", "131072"))
+lmstudio_gpu := env_var_or_default("LMSTUDIO_GPU", "max")
+
+default:
+    @just --justfile "{{ module_directory() }}/Justfile" --working-directory "{{ module_directory() }}" --list
+
+setup *args:
+    @uv --project "{{ root }}" run win-models lmstudio setup --hf-cache "{{ hf_cache }}" --lmstudio-model-root "{{ lmstudio_model_root }}" {{args}}
+
+sync-models *args:
+    @uv --project "{{ root }}" run win-models lmstudio sync-models --hf-cache "{{ hf_cache }}" --lmstudio-model-root "{{ lmstudio_model_root }}" {{args}}
+
+serve model="" *args:
+    @uv --project "{{ root }}" run win-models lmstudio serve --host "{{ lmstudio_host }}" --port {{ lmstudio_port }} --context-length {{ lmstudio_context }} --gpu "{{ lmstudio_gpu }}" --model "{{ model }}" {{args}}
+
+stop:
+    @uv --project "{{ root }}" run win-models lmstudio stop
+
+status:
+    @uv --project "{{ root }}" run win-models lmstudio status --host "{{ lmstudio_host }}" --port {{ lmstudio_port }} --hf-cache "{{ hf_cache }}" --lmstudio-model-root "{{ lmstudio_model_root }}"
+
+list:
+    @uv --project "{{ root }}" run win-models lmstudio list

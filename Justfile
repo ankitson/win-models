@@ -2,6 +2,7 @@ set shell := ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Co
 
 mod plain 'src/plain-llama'
 mod unsloth 'src/unsloth'
+mod lmstudio 'src/lmstudio'
 mod parakeet 'src/parakeet'
 mod comfy 'src/comfyui'
 mod utils 'src/utils'

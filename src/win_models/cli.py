@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import comfyui, parakeet_asr, plain_llama, unsloth, utils
+from . import comfyui, lmstudio, parakeet_asr, plain_llama, unsloth, utils
 
 
 AREAS = {
     "plain": ("Direct llama.cpp and LiteRT commands", plain_llama.main),
     "unsloth": ("Unsloth Studio commands", unsloth.main),
+    "lmstudio": ("LM Studio setup and serve commands", lmstudio.main),
     "parakeet": ("Parakeet ASR sidecar commands", parakeet_asr.main),
     "comfy": ("ComfyUI setup and serve commands", comfyui.main),
     "utils": ("Windows utility commands", utils.main),
