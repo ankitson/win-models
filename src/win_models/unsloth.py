@@ -7,11 +7,12 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import zipfile
 from pathlib import Path
 from typing import Any
 
 from .common import echo, ensure_dir, open_url, powershell, run
-from .config import DEFAULT_MODEL_ROOT, DEFAULT_STUDIO_HOME, DEFAULT_STUDIO_PORT
+from .config import DEFAULT_LLAMA_PORT, DEFAULT_MODEL_ROOT, DEFAULT_STUDIO_HOME, DEFAULT_STUDIO_PORT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -21,13 +22,46 @@ SPECULATIVE_TYPE_SHIM_MARKER = "UNSLOTH_SPECULATIVE_TYPE_SHIM"
 CLI_API_KEY_REUSE_SHIM_MARKER = "UNSLOTH_CLI_API_KEY_REUSE_SHIM"
 OPENAI_REASONING_PASSTHROUGH_SHIM_MARKER = "UNSLOTH_OPENAI_REASONING_PASSTHROUGH_SHIM"
 EMBEDDING_EXTRA_ARGS_SHIM_MARKER = "UNSLOTH_EMBEDDING_EXTRA_ARGS_SHIM"
+FIXED_LLAMA_PORT_SHIM_MARKER = "UNSLOTH_FIXED_LLAMA_PORT_SHIM"
 OPENAI_REQUEST_AUTOLOAD_SHIM_MARKER = "UNSLOTH_OPENAI_REQUEST_AUTOLOAD_SHIM"
 OPENAI_AUTOLOAD_SPECULATIVE_SHIM_MARKER = "UNSLOTH_OPENAI_AUTOLOAD_SPECULATIVE_SHIM"
+WEB_UI_TOOL_POLICY_SHIM_MARKER = "UNSLOTH_WEB_UI_TOOL_POLICY_SHIM"
 NATIVE_AUDIO_MIC_SHIM_MARKER = "UNSLOTH_NATIVE_AUDIO_MIC_SHIM"
+ASSISTANT_PREFIX_CONTINUATION_SHIM_MARKER = "UNSLOTH_ASSISTANT_PREFIX_CONTINUATION_SHIM"
 ASR_FALLBACK_SHIM_MARKER = "UNSLOTH_ASR_FALLBACK_SHIM"
 TAILWIND_SAFE_SOURCE_SHIM_MARKER = "UNSLOTH_TAILWIND_SAFE_SOURCE_SHIM"
 DEFAULT_MCP_CONFIG = (
     Path(__file__).resolve().parents[1] / "unsloth" / "mcp-servers.json"
+)
+PATCH_BASE_COMPLETE_MARKER = ".win-models-patch-base-complete"
+PATCH_BASE_PACKAGE_PREFIXES = ("studio/", "unsloth_cli/")
+PATCHED_SITE_PACKAGE_FILES = (
+    "unsloth_cli/commands/studio.py",
+    "studio/install_llama_prebuilt.py",
+    "studio/backend/core/inference/llama_server_args.py",
+    "studio/backend/core/inference/llama_cpp.py",
+    "studio/backend/models/inference.py",
+    "studio/backend/routes/inference.py",
+    "studio/backend/routes/chat_history.py",
+    "studio/frontend/src/index.css",
+    "studio/frontend/src/features/auth/api.ts",
+    "studio/frontend/src/features/chat/types/runtime.ts",
+    "studio/frontend/src/features/chat/types/api.ts",
+    "studio/frontend/src/features/chat/api/chat-api.ts",
+    "studio/frontend/src/features/chat/api/chat-settings-api.ts",
+    "studio/frontend/src/features/chat/api/chat-adapter.ts",
+    "studio/frontend/src/features/chat/hooks/use-chat-model-runtime.ts",
+    "studio/frontend/src/features/chat/lib/apply-inference-status-to-store.ts",
+    "studio/frontend/src/features/chat/audio-attachment-adapter.ts",
+    "studio/frontend/src/features/chat/utils/chat-settings-storage.ts",
+    "studio/frontend/src/features/chat/stores/chat-runtime-store.ts",
+    "studio/frontend/src/features/chat/presets/preset-policy.ts",
+    "studio/frontend/src/features/chat/chat-settings-sheet.tsx",
+    "studio/frontend/src/components/assistant-ui/thread.tsx",
+    "studio/frontend/src/features/chat/shared-composer.tsx",
+)
+GENERATED_SITE_PACKAGE_FILES = (
+    "studio/frontend/src/features/chat/native-audio-recorder.ts",
 )
 
 
@@ -86,6 +120,19 @@ const GEMMA_NATIVE_AUDIO_RECORDING_SECONDS = 30;
 const WARNING_SECONDS = 5;
 
 export const DEFAULT_VOICE_MESSAGE_PROMPT_TEXT = "";
+export const AUDIO_ONLY_MESSAGE_PLACEHOLDER = "\u200b";
+
+export function stripAudioOnlyMessagePlaceholder(text: string): string {
+  return text.replaceAll(AUDIO_ONLY_MESSAGE_PLACEHOLDER, "");
+}
+
+export function isAudioOnlyMessagePlaceholderText(text?: string | null): boolean {
+  const value = text ?? "";
+  return (
+    value.includes(AUDIO_ONLY_MESSAGE_PLACEHOLDER) &&
+    stripAudioOnlyMessagePlaceholder(value).trim().length === 0
+  );
+}
 
 function clampRecordingSeconds(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_RECORDING_SECONDS;
@@ -396,6 +443,87 @@ def studio_package_dir(studio_home: Path) -> Path:
     return studio_home / "unsloth_studio" / "Lib" / "site-packages" / "studio"
 
 
+def studio_site_packages_dir(studio_home: Path) -> Path:
+    return studio_package_dir(studio_home).parent
+
+
+def resolve_unsloth_source_repo(value: str | None) -> Path | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    repo = Path(raw).expanduser()
+    try:
+        repo = repo.resolve()
+    except OSError:
+        pass
+    required = (
+        "pyproject.toml",
+        "unsloth_cli/commands/studio.py",
+        "studio/backend/run.py",
+        "studio/backend/core/inference/llama_cpp.py",
+    )
+    missing = [name for name in required if not (repo / name).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"Unsloth source repo does not look complete: {repo}\n"
+            f"Missing: {', '.join(missing)}"
+        )
+    return repo
+
+
+def _prepend_pythonpath(env: dict[str, str], path: Path) -> None:
+    path_text = str(path)
+    parts = [part for part in env.get("PYTHONPATH", "").split(os.pathsep) if part]
+    normalized = {part.lower() for part in parts}
+    if path_text.lower() not in normalized:
+        parts.insert(0, path_text)
+    env["PYTHONPATH"] = os.pathsep.join(parts)
+
+
+def _git_revision(repo: Path) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if completed.returncode != 0:
+        return "unknown"
+    return completed.stdout.strip() or "unknown"
+
+
+def prepare_unsloth_source_repo(
+    source_repo: Path,
+    *,
+    build_frontend: bool = False,
+) -> None:
+    frontend = source_repo / "studio" / "frontend"
+    dist_index = frontend / "dist" / "index.html"
+    if build_frontend:
+        if not (frontend / "package.json").is_file():
+            raise FileNotFoundError(f"Missing Studio frontend package.json at {frontend}")
+        if not (frontend / "node_modules").is_dir():
+            echo("  installing Unsloth source frontend dependencies...")
+            run(["npm.cmd", "install"], cwd=frontend)
+        echo("  building Unsloth source frontend...")
+        run(["npm.cmd", "run", "build"], cwd=frontend)
+    elif not dist_index.is_file():
+        echo(
+            "  warning: source frontend dist is not built; Studio may fall back "
+            "to the installed web dist. Use --source-build-frontend for a fully "
+            "source-backed UI."
+        )
+
+    echo(f"  using Unsloth source repo: {source_repo} ({_git_revision(source_repo)})")
+
+
+def configure_unsloth_source_env(env: dict[str, str], source_repo: Path) -> None:
+    _prepend_pythonpath(env, source_repo)
+    env["UNSLOTH_SOURCE_REPO"] = str(source_repo)
+    env["STUDIO_LOCAL_INSTALL"] = "1"
+    env["STUDIO_LOCAL_REPO"] = str(source_repo)
+
+
 def unsloth_cli_studio_command(studio_home: Path) -> Path:
     return (
         studio_home
@@ -406,6 +534,128 @@ def unsloth_cli_studio_command(studio_home: Path) -> Path:
         / "commands"
         / "studio.py"
     )
+
+
+def installed_unsloth_version(studio_home: Path) -> str:
+    site_packages = studio_site_packages_dir(studio_home)
+    metadata_files = sorted(site_packages.glob("unsloth-*.dist-info/METADATA"))
+    for metadata in metadata_files:
+        for line in metadata.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("Version:"):
+                version = line.split(":", 1)[1].strip()
+                if version:
+                    return version
+    raise FileNotFoundError(f"Could not find installed Unsloth package metadata in {site_packages}")
+
+
+def _patch_workspace(studio_home: Path) -> Path:
+    return studio_home / ".win-models" / "studio-patches"
+
+
+def _patch_base_dir(studio_home: Path, version: str) -> Path:
+    return _patch_workspace(studio_home) / "bases" / f"unsloth-{version}" / "site-packages"
+
+
+def _find_cached_unsloth_wheel(wheels_dir: Path, version: str) -> Path | None:
+    wheels = sorted(wheels_dir.glob(f"unsloth-{version}-*.whl"))
+    return wheels[0] if wheels else None
+
+
+def _download_unsloth_wheel(studio_home: Path, version: str) -> Path:
+    python = resolve_studio_python(studio_home)
+    wheels_dir = _patch_workspace(studio_home) / "wheels"
+    ensure_dir(wheels_dir)
+    cached = _find_cached_unsloth_wheel(wheels_dir, version)
+    if cached is not None:
+        return cached
+
+    echo(f"  downloading clean Unsloth wheel for patch base: unsloth=={version}")
+    completed = subprocess.run(
+        [
+            python,
+            "-m",
+            "pip",
+            "download",
+            "--disable-pip-version-check",
+            "--no-deps",
+            "--only-binary=:all:",
+            "--dest",
+            str(wheels_dir),
+            f"unsloth=={version}",
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "Could not download the clean Unsloth wheel used as the patch base.\n"
+            + completed.stdout.strip()
+        )
+    cached = _find_cached_unsloth_wheel(wheels_dir, version)
+    if cached is None:
+        raise FileNotFoundError(f"pip download succeeded but no unsloth=={version} wheel was found in {wheels_dir}")
+    return cached
+
+
+def _safe_extract_wheel_member(zf: zipfile.ZipFile, member: zipfile.ZipInfo, destination_root: Path) -> None:
+    member_name = member.filename.replace("\\", "/")
+    parts = [part for part in member_name.split("/") if part]
+    if member.is_dir() or not parts:
+        return
+    if any(part in {"", ".", ".."} for part in parts):
+        raise RuntimeError(f"Refusing unsafe wheel path: {member.filename}")
+    destination = destination_root.joinpath(*parts)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with zf.open(member) as source, destination.open("wb") as target:
+        shutil.copyfileobj(source, target)
+
+
+def _ensure_studio_patch_base(studio_home: Path) -> Path:
+    version = installed_unsloth_version(studio_home)
+    base_dir = _patch_base_dir(studio_home, version)
+    if (base_dir / PATCH_BASE_COMPLETE_MARKER).is_file():
+        return base_dir
+
+    wheel = _download_unsloth_wheel(studio_home, version)
+    tmp_dir = base_dir.with_name(base_dir.name + ".tmp")
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    if base_dir.exists():
+        shutil.rmtree(base_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(wheel) as zf:
+        for member in zf.infolist():
+            member_name = member.filename.replace("\\", "/")
+            if member_name.startswith(PATCH_BASE_PACKAGE_PREFIXES):
+                _safe_extract_wheel_member(zf, member, tmp_dir)
+
+    if not (tmp_dir / "studio" / "__init__.py").is_file():
+        raise RuntimeError(f"Wheel {wheel} did not contain the expected Studio package files")
+    (tmp_dir / PATCH_BASE_COMPLETE_MARKER).write_text(version, encoding="utf-8")
+    tmp_dir.rename(base_dir)
+    echo(f"  cached clean Unsloth patch base: {base_dir}")
+    return base_dir
+
+
+def restore_studio_patch_base(studio_home: Path) -> None:
+    base_dir = _ensure_studio_patch_base(studio_home)
+    site_packages = studio_site_packages_dir(studio_home)
+    restored = 0
+    for rel in PATCHED_SITE_PACKAGE_FILES:
+        source = base_dir / rel
+        destination = site_packages / rel
+        if not source.is_file():
+            raise FileNotFoundError(f"Patch base is missing {rel}; refresh the base cache for {base_dir}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        restored += 1
+    for rel in GENERATED_SITE_PACKAGE_FILES:
+        generated = site_packages / rel
+        if generated.exists():
+            generated.unlink()
+    echo(f"  restored {restored} Studio patch target(s) from clean Unsloth base")
 
 
 def apply_embedding_extra_args_shim(studio_home: Path) -> None:
@@ -433,6 +683,56 @@ def apply_embedding_extra_args_shim(studio_home: Path) -> None:
         )
     target.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
     echo("  applied embedding extra-args shim to backend.core.inference.llama_server_args")
+
+
+def apply_fixed_llama_port_shim(studio_home: Path) -> None:
+    target = studio_package_dir(studio_home) / "backend" / "core" / "inference" / "llama_cpp.py"
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if FIXED_LLAMA_PORT_SHIM_MARKER in text:
+        echo("  fixed llama-server port shim already present")
+        return
+
+    old = '''    @staticmethod
+    def _find_free_port() -> int:
+        """Find an available TCP port."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+'''
+    new = f'''    @staticmethod
+    def _find_free_port() -> int:
+        """Find an available TCP port."""
+        # {FIXED_LLAMA_PORT_SHIM_MARKER}: expose Studio's embedded llama-server
+        # on a stable loopback port so Caddy and direct probes can target it.
+        fixed_port = (
+            os.environ.get("UNSLOTH_LLAMA_PORT")
+            or os.environ.get("WIN_MODELS_LLAMA_PORT")
+            or ""
+        ).strip()
+        if fixed_port:
+            try:
+                port = int(fixed_port)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"UNSLOTH_LLAMA_PORT must be an integer, got {{fixed_port!r}}"
+                ) from exc
+            if port <= 0 or port > 65535:
+                raise RuntimeError(
+                    f"UNSLOTH_LLAMA_PORT must be between 1 and 65535, got {{port}}"
+                )
+            return port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+'''
+    if old not in text:
+        raise RuntimeError(
+            f"Could not find _find_free_port anchor in {target}; the Studio backend changed."
+        )
+    target.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+    echo("  applied fixed llama-server port shim to backend.core.inference.llama_cpp")
 
 
 def apply_llama_local_zip_shim(studio_home: Path) -> None:
@@ -1469,6 +1769,115 @@ def apply_openai_autoload_speculative_shim(studio_home: Path) -> None:
     echo("  applied OpenAI autoload speculative shim to backend.routes.inference")
 
 
+def apply_web_ui_tool_policy_shim(studio_home: Path) -> None:
+    frontend_auth = (
+        studio_package_dir(studio_home)
+        / "frontend"
+        / "src"
+        / "features"
+        / "auth"
+        / "api.ts"
+    )
+    if not frontend_auth.exists():
+        raise FileNotFoundError(f"Missing {frontend_auth}")
+    text = frontend_auth.read_text(encoding="utf-8").replace("\r\n", "\n")
+    changed = False
+    if 'headers.set("X-Unsloth-Studio-UI", "1");' not in text:
+        text = _replace_once(
+            text,
+            "  const retryHeaders = new Headers(init?.headers);\n",
+            (
+                "  const retryHeaders = new Headers(init?.headers);\n"
+                "  retryHeaders.set(\"X-Unsloth-Studio-UI\", \"1\");\n"
+            ),
+            frontend_auth,
+            "Studio UI auth retry header",
+        )
+        text = _replace_once(
+            text,
+            "  const headers = new Headers(init?.headers);\n",
+            (
+                "  const headers = new Headers(init?.headers);\n"
+                "  headers.set(\"X-Unsloth-Studio-UI\", \"1\");\n"
+            ),
+            frontend_auth,
+            "Studio UI auth header",
+        )
+        frontend_auth.write_text(text, encoding="utf-8", newline="\n")
+        changed = True
+
+    backend = studio_package_dir(studio_home) / "backend" / "routes" / "inference.py"
+    if not backend.exists():
+        raise FileNotFoundError(f"Missing {backend}")
+    text = backend.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if WEB_UI_TOOL_POLICY_SHIM_MARKER not in text:
+        text = _replace_once(
+            text,
+            "from auth.authentication import get_current_subject\n",
+            (
+                "from auth.authentication import get_current_subject\n"
+                "from auth.storage import API_KEY_PREFIX\n"
+            ),
+            backend,
+            "API key prefix import",
+        )
+        old = '''def _effective_enable_tools(payload) -> Optional[bool]:
+    """Resolve `payload.enable_tools` against the process-level tool policy.
+
+    Returns the policy value when set (CLI hard-override from `unsloth run`),
+    else the per-request value.
+    """
+    from state.tool_policy import get_tool_policy
+
+    policy = get_tool_policy()
+    return policy if policy is not None else payload.enable_tools
+'''
+        new = f'''def _is_api_key_request(request: Optional[Request]) -> bool:
+    auth_header = request.headers.get("authorization", "") if request is not None else ""
+    if not auth_header.lower().startswith("bearer "):
+        return False
+    return auth_header[7:].startswith(API_KEY_PREFIX)
+
+
+def _is_studio_web_ui_request(request: Optional[Request]) -> bool:
+    return (
+        request is not None
+        and request.headers.get("x-unsloth-studio-ui") == "1"
+        and not _is_api_key_request(request)
+    )
+
+
+def _effective_enable_tools(payload, request: Optional[Request] = None) -> Optional[bool]:
+    """Resolve `payload.enable_tools` against process and caller policy.
+
+    # {WEB_UI_TOOL_POLICY_SHIM_MARKER}: default to UI-only server-side tools.
+    Generated API keys cannot enable in-process tools even if they send
+    enable_tools=true. The Studio web UI can opt in per turn via authFetch's
+    first-party header. Explicit CLI policy only applies to tagged UI traffic.
+    """
+    from state.tool_policy import get_tool_policy
+
+    if not _is_studio_web_ui_request(request):
+        return False
+    policy = get_tool_policy()
+    if policy is not None:
+        return policy
+    return payload.enable_tools
+'''
+        text = _replace_once(text, old, new, backend, "web UI tool policy helper")
+        text = text.replace(
+            "_effective_enable_tools(payload)",
+            "_effective_enable_tools(payload, request)",
+        )
+        backend.write_text(text, encoding="utf-8", newline="\n")
+        changed = True
+
+    if changed:
+        echo("  applied web UI-only tool policy shim")
+    else:
+        echo("  web UI-only tool policy shim already present")
+
+
 def find_llama_zips(zip_dir: Path, release_tag: str, runtime: str) -> tuple[Path, Path]:
     bin_name = f"llama-{release_tag}-bin-win-cuda-{runtime}-x64.zip"
     cudart_name = f"cudart-llama-bin-win-cuda-{runtime}-x64.zip"
@@ -2418,6 +2827,21 @@ export async function transcribeVoiceAudio(audioBase64: string): Promise<string>
     new_send = """  async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
     try {
       const base64 = await fileToBase64(attachment.file);
+      const state = useChatRuntimeStore.getState();
+      const checkpoint = state.params.checkpoint;
+      const activeModel = state.models.find((m) => m.id === checkpoint);
+      if (activeModel?.hasAudioInput) {
+        // Backend takes raw base64; format only satisfies the part type.
+        const format = attachment.contentType === "audio/mpeg" ? "mp3" : "wav";
+        return {
+          id: attachment.id,
+          type: "file",
+          name: attachment.name,
+          contentType: attachment.contentType,
+          content: [{ type: "audio", audio: { data: base64, format } }],
+          status: { type: "complete" },
+        };
+      }
       const transcript = await transcribeVoiceAudio(base64);
       const promptText = useChatRuntimeStore.getState().voiceMessagePromptText;
       const text = buildVoiceMessageText({ transcript, promptText });
@@ -2436,6 +2860,28 @@ export async function transcribeVoiceAudio(audioBase64: string): Promise<string>
 """
     if old_send in text:
         text = text.replace(old_send, new_send, 1)
+        changed = True
+    current_asr_send = """  async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
+    try {
+      const base64 = await fileToBase64(attachment.file);
+      const transcript = await transcribeVoiceAudio(base64);
+      const promptText = useChatRuntimeStore.getState().voiceMessagePromptText;
+      const text = buildVoiceMessageText({ transcript, promptText });
+      return {
+        id: attachment.id,
+        type: "file",
+        name: attachment.name,
+        contentType: "text/plain",
+        content: [{ type: "text", text }],
+        status: { type: "complete" },
+      };
+    } finally {
+      this.attachmentIds.delete(attachment.id);
+    }
+  }
+"""
+    if current_asr_send in text:
+        text = text.replace(current_asr_send, new_send, 1)
         changed = True
     if changed:
         audio_adapter.write_text(text, encoding="utf-8", newline="\n")
@@ -2563,6 +3009,67 @@ def _apply_native_audio_frontend_api_shim(frontend: Path) -> bool:
         old = "  voiceRecordingMaxSeconds?: number;\n"
         new = old + "  voiceMessagePromptText?: string;\n"
         text = _replace_once(text, old, new, target, "chat settings voice prompt API type")
+        changed = True
+    if changed:
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return changed
+
+
+def _apply_audio_only_placeholder_chat_adapter_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "features" / "chat" / "api" / "chat-adapter.ts"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    changed = False
+    import_line = 'import { stripAudioOnlyMessagePlaceholder } from "../native-audio-recorder";\n'
+    if import_line not in text:
+        text = _replace_once(
+            text,
+            'import { useExternalProvidersStore } from "../stores/external-providers-store";\n',
+            'import { useExternalProvidersStore } from "../stores/external-providers-store";\n'
+            + import_line,
+            target,
+            "audio-only placeholder chat adapter import",
+        )
+        changed = True
+    old_collect = """function collectTextParts(message: RunMessage): string[] {
+  const textParts = message.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text);
+
+  if ("attachments" in message && (message.attachments?.length ?? 0) > 0) {
+    for (const attachment of message.attachments ?? []) {
+      for (const part of attachment.content ?? []) {
+        if (part.type === "text") {
+          textParts.push(part.text);
+        }
+      }
+    }
+  }
+
+  return textParts;
+}
+"""
+    new_collect = """function collectTextParts(message: RunMessage): string[] {
+  const textParts = message.content
+    .filter((part) => part.type === "text")
+    .map((part) => stripAudioOnlyMessagePlaceholder(part.text))
+    .filter((text) => text.trim().length > 0);
+
+  if ("attachments" in message && (message.attachments?.length ?? 0) > 0) {
+    for (const attachment of message.attachments ?? []) {
+      for (const part of attachment.content ?? []) {
+        if (part.type === "text") {
+          const text = stripAudioOnlyMessagePlaceholder(part.text);
+          if (text.trim().length > 0) textParts.push(text);
+        }
+      }
+    }
+  }
+
+  return textParts;
+}
+"""
+    if old_collect in text:
+        text = text.replace(old_collect, new_collect, 1)
         changed = True
     if changed:
         target.write_text(text, encoding="utf-8", newline="\n")
@@ -2762,18 +3269,6 @@ def _apply_native_audio_runtime_store_shim(frontend: Path) -> bool:
         ),
     ]
     for old, new, label in replacements:
-        if (
-            label in {
-                "store field",
-                "store setter type",
-                "scalar setting key",
-                "scalar setting list",
-                "default voice setting",
-                "voice setter implementation",
-            }
-            and "voiceRecordingMaxSeconds" in text
-        ):
-            continue
         if new in text:
             continue
         text = _replace_once(text, old, new, target, label)
@@ -2837,6 +3332,9 @@ def _apply_native_audio_settings_panel_shim(frontend: Path) -> bool:
     target = frontend / "src" / "features" / "chat" / "chat-settings-sheet.tsx"
     text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
     changed = False
+    if "max={32768}" in text:
+        text = text.replace("max={32768}", "max={131072}", 1)
+        changed = True
     if "RUN_SETTINGS_PANEL_WIDTH_STORAGE_KEY" not in text:
         old = "  const isMobile = useIsMobile();\n"
         new = """  const isMobile = useIsMobile();
@@ -3048,6 +3546,68 @@ function VoiceMessagePromptTextArea() {
     return changed
 
 
+def _apply_gemma_recommended_preset_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "features" / "chat" / "presets" / "preset-policy.ts"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    changed = False
+    if '| "maxSeqLength"' not in text:
+        text = _replace_once(
+            text,
+            '  | "presencePenalty"\n  | "maxTokens"\n',
+            '  | "presencePenalty"\n  | "maxSeqLength"\n  | "maxTokens"\n',
+            target,
+            "preset-owned max sequence length",
+        )
+        changed = True
+    if 'name: "Gemma Recommended"' not in text:
+        old = """export const BUILTIN_PRESETS: Preset[] = [
+  { name: "Default", params: { ...defaultInferenceParams } },
+];
+"""
+        new = """export const GEMMA_RECOMMENDED_MAX_SEQ_LENGTH = 131072;
+
+export const BUILTIN_PRESETS: Preset[] = [
+  { name: "Default", params: { ...defaultInferenceParams } },
+  {
+    name: "Gemma Recommended",
+    params: {
+      ...defaultInferenceParams,
+      temperature: 1.0,
+      topP: 0.95,
+      topK: 64,
+      minP: 0.0,
+      repetitionPenalty: 1.0,
+      presencePenalty: 0.0,
+      maxSeqLength: GEMMA_RECOMMENDED_MAX_SEQ_LENGTH,
+    },
+  },
+];
+"""
+        text = _replace_once(text, old, new, target, "Gemma recommended preset")
+        changed = True
+    if "    maxSeqLength: params.maxSeqLength,\n" not in text:
+        text = _replace_once(
+            text,
+            "    presencePenalty: params.presencePenalty,\n    maxTokens: params.maxTokens,\n",
+            "    presencePenalty: params.presencePenalty,\n    maxSeqLength: params.maxSeqLength,\n    maxTokens: params.maxTokens,\n",
+            target,
+            "preset-owned max sequence length value",
+        )
+        changed = True
+    if "    left.maxSeqLength === right.maxSeqLength &&\n" not in text:
+        text = _replace_once(
+            text,
+            "    left.presencePenalty === right.presencePenalty &&\n    left.maxTokens === right.maxTokens &&\n",
+            "    left.presencePenalty === right.presencePenalty &&\n    left.maxSeqLength === right.maxSeqLength &&\n    left.maxTokens === right.maxTokens &&\n",
+            target,
+            "preset max sequence length comparison",
+        )
+        changed = True
+    if changed:
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return changed
+
+
 def _apply_native_audio_thread_shim(frontend: Path) -> bool:
     target = frontend / "src" / "components" / "assistant-ui" / "thread.tsx"
     text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
@@ -3059,7 +3619,7 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
             (
                 'import { sentAudioNames } from "@/features/chat/api/chat-adapter";\n'
                 'import { transcribeVoiceAudio } from "@/features/chat/api/chat-api";\n'
-                'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n'
+                'import { AUDIO_ONLY_MESSAGE_PLACEHOLDER, buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, isAudioOnlyMessagePlaceholderText, stripAudioOnlyMessagePlaceholder, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n'
             ),
             target,
             "native recorder import",
@@ -3072,7 +3632,7 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
     ):
         text = text.replace(
             'import { useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n',
-            'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n',
+            'import { AUDIO_ONLY_MESSAGE_PLACEHOLDER, buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, isAudioOnlyMessagePlaceholderText, stripAudioOnlyMessagePlaceholder, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n',
             1,
         )
         changed = True
@@ -3086,15 +3646,20 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
         )
         changed = True
     if (
-        'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n'
+        'import { AUDIO_ONLY_MESSAGE_PLACEHOLDER, buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, isAudioOnlyMessagePlaceholderText, stripAudioOnlyMessagePlaceholder, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n'
         not in text
         and 'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n' in text
     ):
         text = text.replace(
             'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n',
-            'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n',
+            'import { AUDIO_ONLY_MESSAGE_PLACEHOLDER, buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, isAudioOnlyMessagePlaceholderText, stripAudioOnlyMessagePlaceholder, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n',
             1,
         )
+        changed = True
+    old_thread_recorder_import = 'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n'
+    new_thread_recorder_import = 'import { AUDIO_ONLY_MESSAGE_PLACEHOLDER, buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, isAudioOnlyMessagePlaceholderText, stripAudioOnlyMessagePlaceholder, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n'
+    if old_thread_recorder_import in text:
+        text = text.replace(old_thread_recorder_import, new_thread_recorder_import, 1)
         changed = True
     if "  recordingDisabled?: boolean;\n" not in text:
         text = _replace_once(
@@ -3150,25 +3715,18 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
     "    if (activeVoiceModel?.hasAudioInput) {\n"
     "      setPendingAudio(base64, name);\n"
     "      const currentText = aui.composer().getState().text;\n"
-    "      let transcript: string | undefined;\n"
-    "      try {\n"
-    "        transcript = await transcribeVoiceAudio(base64);\n"
-    "      } catch (error) {\n"
-    "        console.warn(\"Voice transcription for chat history failed:\", error);\n"
-    "        toast.error(\"Voice transcript failed; sending audio without saved transcript.\");\n"
-    "      }\n"
     "      const nextText = buildVoiceMessageText({\n"
-    "        existingText: currentText,\n"
-    "        transcript,\n"
+    "        existingText: stripAudioOnlyMessagePlaceholder(currentText),\n"
     "        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,\n"
     "      });\n"
-            "      if (nextText && nextText !== currentText) aui.composer().setText(nextText);\n"
+            "      const sendText = nextText || AUDIO_ONLY_MESSAGE_PLACEHOLDER;\n"
+            "      if (sendText !== currentText) aui.composer().setText(sendText);\n"
             "      return;\n"
             "    }\n"
             "    const transcript = await transcribeVoiceAudio(base64);\n"
             "    const currentText = aui.composer().getState().text;\n"
             "    const nextText = buildVoiceMessageText({\n"
-            "      existingText: currentText,\n"
+            "      existingText: stripAudioOnlyMessagePlaceholder(currentText),\n"
             "      transcript,\n"
             "      promptText: useChatRuntimeStore.getState().voiceMessagePromptText,\n"
             "    });\n"
@@ -3264,25 +3822,18 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
     if (activeVoiceModel?.hasAudioInput) {
       setPendingAudio(base64, name);
       const currentText = aui.composer().getState().text;
-      let transcript: string | undefined;
-      try {
-        transcript = await transcribeVoiceAudio(base64);
-      } catch (error) {
-        console.warn("Voice transcription for chat history failed:", error);
-        toast.error("Voice transcript failed; sending audio without saved transcript.");
-      }
       const nextText = buildVoiceMessageText({
-        existingText: currentText,
-        transcript,
+        existingText: stripAudioOnlyMessagePlaceholder(currentText),
         promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
       });
-      if (nextText && nextText !== currentText) aui.composer().setText(nextText);
+      const sendText = nextText || AUDIO_ONLY_MESSAGE_PLACEHOLDER;
+      if (sendText !== currentText) aui.composer().setText(sendText);
       return;
     }
     const transcript = await transcribeVoiceAudio(base64);
     const currentText = aui.composer().getState().text;
     const nextText = buildVoiceMessageText({
-      existingText: currentText,
+      existingText: stripAudioOnlyMessagePlaceholder(currentText),
       transcript,
       promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
     });
@@ -3306,6 +3857,21 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
     new_native_recorder_history = """    if (activeVoiceModel?.hasAudioInput) {
       setPendingAudio(base64, name);
       const currentText = aui.composer().getState().text;
+      const nextText = buildVoiceMessageText({
+        existingText: stripAudioOnlyMessagePlaceholder(currentText),
+        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+      });
+      const sendText = nextText || AUDIO_ONLY_MESSAGE_PLACEHOLDER;
+      if (sendText !== currentText) aui.composer().setText(sendText);
+      return;
+    }
+"""
+    if old_native_recorder_history in text:
+        text = text.replace(old_native_recorder_history, new_native_recorder_history, 1)
+        changed = True
+    current_thread_native_recorder_history = """    if (activeVoiceModel?.hasAudioInput) {
+      setPendingAudio(base64, name);
+      const currentText = aui.composer().getState().text;
       let transcript: string | undefined;
       try {
         transcript = await transcribeVoiceAudio(base64);
@@ -3322,8 +3888,29 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
       return;
     }
 """
-    if old_native_recorder_history in text:
-        text = text.replace(old_native_recorder_history, new_native_recorder_history, 1)
+    if current_thread_native_recorder_history in text:
+        text = text.replace(current_thread_native_recorder_history, new_native_recorder_history, 1)
+        changed = True
+    current_thread_asr_recorder_history = """    const transcript = await transcribeVoiceAudio(base64);
+    const currentText = aui.composer().getState().text;
+    const nextText = buildVoiceMessageText({
+      existingText: currentText,
+      transcript,
+      promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+    });
+    if (nextText) aui.composer().setText(nextText);
+"""
+    updated_thread_asr_recorder_history = """    const transcript = await transcribeVoiceAudio(base64);
+    const currentText = aui.composer().getState().text;
+    const nextText = buildVoiceMessageText({
+      existingText: stripAudioOnlyMessagePlaceholder(currentText),
+      transcript,
+      promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+    });
+    if (nextText) aui.composer().setText(nextText);
+"""
+    if current_thread_asr_recorder_history in text:
+        text = text.replace(current_thread_asr_recorder_history, updated_thread_asr_recorder_history, 1)
         changed = True
     old_dictation = (
         "      <ComposerPrimitive.If dictation={false}>\n"
@@ -3454,11 +4041,9 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
                 "      return;\n"
                 "    }\n"
                 "    const voicePrompt = useChatRuntimeStore.getState().voiceMessagePromptText.trim();\n"
-                "    if (!voicePrompt) {\n"
-                "      return;\n"
-                "    }\n"
+                "    const sendText = voicePrompt || AUDIO_ONLY_MESSAGE_PLACEHOLDER;\n"
                 "    flushResourcesSync(() => {\n"
-                "      aui.composer().setText(voicePrompt);\n"
+                "      aui.composer().setText(sendText);\n"
                 "    });\n"
                 "  }, [aui, composerText, hasAttachments, hasPendingAudio]);\n"
             ),
@@ -3480,6 +4065,20 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
       return;
     }
     const voicePrompt = useChatRuntimeStore.getState().voiceMessagePromptText.trim();
+    const sendText = voicePrompt || AUDIO_ONLY_MESSAGE_PLACEHOLDER;
+    flushResourcesSync(() => {
+      aui.composer().setText(sendText);
+    });
+  }, [aui, composerText, hasAttachments, hasPendingAudio]);
+"""
+    if old_ensure in text:
+        text = text.replace(old_ensure, new_ensure, 1)
+        changed = True
+    old_prompt_ensure = """  const ensureAudioOnlyComposerText = useCallback(() => {
+    if (!hasPendingAudio || composerText.trim().length > 0 || hasAttachments) {
+      return;
+    }
+    const voicePrompt = useChatRuntimeStore.getState().voiceMessagePromptText.trim();
     if (!voicePrompt) {
       return;
     }
@@ -3488,8 +4087,8 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
     });
   }, [aui, composerText, hasAttachments, hasPendingAudio]);
 """
-    if old_ensure in text:
-        text = text.replace(old_ensure, new_ensure, 1)
+    if old_prompt_ensure in text:
+        text = text.replace(old_prompt_ensure, new_ensure, 1)
         changed = True
     if "if (text.trim().length > 0 || attachments.length > 0) {\n      aui.composer().send();" in text:
         text = text.replace(
@@ -3514,6 +4113,68 @@ def _apply_native_audio_thread_shim(frontend: Path) -> bool:
             1,
         )
         changed = True
+    if "const UserMessageBody: FC = () => {" not in text:
+        old_user_message_body = """const UserMessage: FC = () => {
+  return (
+    <MessagePrimitive.Root
+      className="aui-user-message-root fade-in slide-in-from-bottom-1 mx-auto flex w-full max-w-(--thread-content-max-width) animate-in flex-col items-end gap-y-2 pt-6 pb-4 text-[15.5px] [font-weight:410] tracking-[0.01em] dark:tracking-[0.02em] duration-150"
+      data-role="user"
+    >
+      <UserMessageAttachments />
+      <UserMessageAudio />
+
+      <div className="aui-user-message-content-wrapper flex max-w-[80%] min-w-0 flex-col items-end">
+        <div className="aui-user-message-content wrap-break-word w-fit rounded-[24px] bg-[#f5f5f5] px-4 py-2.5 text-[#0d0d0d] dark:text-foreground dark:bg-card">
+          <MessagePrimitive.Parts />
+        </div>
+        <div className="mt-1 -mr-[var(--icon-btn-inset)] flex min-h-8 items-center">
+          <UserActionBar />
+          <BranchPicker className="aui-user-branch-picker ml-0.5" />
+        </div>
+      </div>
+    </MessagePrimitive.Root>
+  );
+};
+"""
+        new_user_message_body = """const UserMessageBody: FC = () => {
+  const hasVisibleBody = useAuiState(({ message }) =>
+    message.content.some((part) => {
+      if (part.type !== "text") return true;
+      return !isAudioOnlyMessagePlaceholderText(part.text);
+    }),
+  );
+  if (!hasVisibleBody) {
+    return null;
+  }
+  return (
+    <div className="aui-user-message-content-wrapper flex max-w-[80%] min-w-0 flex-col items-end">
+      <div className="aui-user-message-content wrap-break-word w-fit rounded-[24px] bg-[#f5f5f5] px-4 py-2.5 text-[#0d0d0d] dark:text-foreground dark:bg-card">
+        <MessagePrimitive.Parts />
+      </div>
+      <div className="mt-1 -mr-[var(--icon-btn-inset)] flex min-h-8 items-center">
+        <UserActionBar />
+        <BranchPicker className="aui-user-branch-picker ml-0.5" />
+      </div>
+    </div>
+  );
+};
+
+const UserMessage: FC = () => {
+  return (
+    <MessagePrimitive.Root
+      className="aui-user-message-root fade-in slide-in-from-bottom-1 mx-auto flex w-full max-w-(--thread-content-max-width) animate-in flex-col items-end gap-y-2 pt-6 pb-4 text-[15.5px] [font-weight:410] tracking-[0.01em] dark:tracking-[0.02em] duration-150"
+      data-role="user"
+    >
+      <UserMessageAttachments />
+      <UserMessageAudio />
+      <UserMessageBody />
+    </MessagePrimitive.Root>
+  );
+};
+"""
+        if old_user_message_body in text:
+            text = text.replace(old_user_message_body, new_user_message_body, 1)
+            changed = True
     if changed:
         target.write_text(text, encoding="utf-8", newline="\n")
     return changed
@@ -3529,7 +4190,7 @@ def _apply_native_audio_shared_composer_shim(frontend: Path) -> bool:
             'import { McpComposerButton } from "./mcp-composer-button";\n',
             (
                 'import { McpComposerButton } from "./mcp-composer-button";\n'
-                'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n'
+                'import { AUDIO_ONLY_MESSAGE_PLACEHOLDER, buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, stripAudioOnlyMessagePlaceholder, useNativeAudioRecorder } from "./native-audio-recorder";\n'
             ),
             target,
             "shared recorder import",
@@ -3542,20 +4203,25 @@ def _apply_native_audio_shared_composer_shim(frontend: Path) -> bool:
     ):
         text = text.replace(
             'import { useNativeAudioRecorder } from "./native-audio-recorder";\n',
-            'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n',
+            'import { AUDIO_ONLY_MESSAGE_PLACEHOLDER, buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, stripAudioOnlyMessagePlaceholder, useNativeAudioRecorder } from "./native-audio-recorder";\n',
             1,
         )
         changed = True
     if (
-        'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n'
+        'import { AUDIO_ONLY_MESSAGE_PLACEHOLDER, buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, stripAudioOnlyMessagePlaceholder, useNativeAudioRecorder } from "./native-audio-recorder";\n'
         not in text
         and 'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n' in text
     ):
         text = text.replace(
             'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n',
-            'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n',
+            'import { AUDIO_ONLY_MESSAGE_PLACEHOLDER, buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, stripAudioOnlyMessagePlaceholder, useNativeAudioRecorder } from "./native-audio-recorder";\n',
             1,
         )
+        changed = True
+    old_shared_recorder_import = 'import { buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n'
+    new_shared_recorder_import = 'import { AUDIO_ONLY_MESSAGE_PLACEHOLDER, buildVoiceMessageText, getEffectiveVoiceRecordingMaxSeconds, stripAudioOnlyMessagePlaceholder, useNativeAudioRecorder } from "./native-audio-recorder";\n'
+    if old_shared_recorder_import in text:
+        text = text.replace(old_shared_recorder_import, new_shared_recorder_import, 1)
         changed = True
     if 'import { loadModel, transcribeVoiceAudio, validateModel } from "./api/chat-api";\n' not in text:
         if 'import { loadModel, validateModel } from "./api/chat-api";\n' in text:
@@ -3596,24 +4262,17 @@ def _apply_native_audio_shared_composer_shim(frontend: Path) -> bool:
             + "    if (activeModel?.hasAudioInput) {\n"
             + "      setPendingAudio({ name, base64 });\n"
             + "      setPendingAudioStore(base64, name);\n"
-            + "      let transcript: string | undefined;\n"
-            + "      try {\n"
-            + "        transcript = await transcribeVoiceAudio(base64);\n"
-            + "      } catch (error) {\n"
-            + "        console.warn(\"Voice transcription for chat history failed:\", error);\n"
-            + "        toast.error(\"Voice transcript failed; sending audio without saved transcript.\");\n"
-            + "      }\n"
             + "      const nextText = buildVoiceMessageText({\n"
-            + "        existingText: text,\n"
-            + "        transcript,\n"
+            + "        existingText: stripAudioOnlyMessagePlaceholder(text),\n"
             + "        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,\n"
             + "      });\n"
-            + "      if (nextText && nextText !== text) setText(nextText);\n"
+            + "      const sendText = nextText || AUDIO_ONLY_MESSAGE_PLACEHOLDER;\n"
+            + "      if (sendText !== text) setText(sendText);\n"
             + "      return;\n"
             + "    }\n"
             + "    const transcript = await transcribeVoiceAudio(base64);\n"
             + "    const nextText = buildVoiceMessageText({\n"
-            + "      existingText: text,\n"
+            + "      existingText: stripAudioOnlyMessagePlaceholder(text),\n"
             + "      transcript,\n"
             + "      promptText: useChatRuntimeStore.getState().voiceMessagePromptText,\n"
             + "    });\n"
@@ -3672,24 +4331,17 @@ def _apply_native_audio_shared_composer_shim(frontend: Path) -> bool:
     if (activeModel?.hasAudioInput) {
       setPendingAudio({ name, base64 });
       setPendingAudioStore(base64, name);
-      let transcript: string | undefined;
-      try {
-        transcript = await transcribeVoiceAudio(base64);
-      } catch (error) {
-        console.warn("Voice transcription for chat history failed:", error);
-        toast.error("Voice transcript failed; sending audio without saved transcript.");
-      }
       const nextText = buildVoiceMessageText({
-        existingText: text,
-        transcript,
+        existingText: stripAudioOnlyMessagePlaceholder(text),
         promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
       });
-      if (nextText && nextText !== text) setText(nextText);
+      const sendText = nextText || AUDIO_ONLY_MESSAGE_PLACEHOLDER;
+      if (sendText !== text) setText(sendText);
       return;
     }
     const transcript = await transcribeVoiceAudio(base64);
     const nextText = buildVoiceMessageText({
-      existingText: text,
+      existingText: stripAudioOnlyMessagePlaceholder(text),
       transcript,
       promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
     });
@@ -3713,6 +4365,21 @@ def _apply_native_audio_shared_composer_shim(frontend: Path) -> bool:
     new_shared_native_recorder_history = """    if (activeModel?.hasAudioInput) {
       setPendingAudio({ name, base64 });
       setPendingAudioStore(base64, name);
+      const nextText = buildVoiceMessageText({
+        existingText: stripAudioOnlyMessagePlaceholder(text),
+        promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+      });
+      const sendText = nextText || AUDIO_ONLY_MESSAGE_PLACEHOLDER;
+      if (sendText !== text) setText(sendText);
+      return;
+    }
+"""
+    if old_shared_native_recorder_history in text:
+        text = text.replace(old_shared_native_recorder_history, new_shared_native_recorder_history, 1)
+        changed = True
+    current_shared_native_recorder_history = """    if (activeModel?.hasAudioInput) {
+      setPendingAudio({ name, base64 });
+      setPendingAudioStore(base64, name);
       let transcript: string | undefined;
       try {
         transcript = await transcribeVoiceAudio(base64);
@@ -3729,8 +4396,27 @@ def _apply_native_audio_shared_composer_shim(frontend: Path) -> bool:
       return;
     }
 """
-    if old_shared_native_recorder_history in text:
-        text = text.replace(old_shared_native_recorder_history, new_shared_native_recorder_history, 1)
+    if current_shared_native_recorder_history in text:
+        text = text.replace(current_shared_native_recorder_history, new_shared_native_recorder_history, 1)
+        changed = True
+    current_shared_asr_recorder_history = """    const transcript = await transcribeVoiceAudio(base64);
+    const nextText = buildVoiceMessageText({
+      existingText: text,
+      transcript,
+      promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+    });
+    if (nextText) setText(nextText);
+"""
+    updated_shared_asr_recorder_history = """    const transcript = await transcribeVoiceAudio(base64);
+    const nextText = buildVoiceMessageText({
+      existingText: stripAudioOnlyMessagePlaceholder(text),
+      transcript,
+      promptText: useChatRuntimeStore.getState().voiceMessagePromptText,
+    });
+    if (nextText) setText(nextText);
+"""
+    if current_shared_asr_recorder_history in text:
+        text = text.replace(current_shared_asr_recorder_history, updated_shared_asr_recorder_history, 1)
         changed = True
     old_shared_audio_submit = """    if (pendingAudio) {
       content.push({ type: "audio", audio: pendingAudio.base64 });
@@ -3760,6 +4446,13 @@ def _apply_native_audio_shared_composer_shim(frontend: Path) -> bool:
 """
     if old_shared_audio_submit in text:
         text = text.replace(old_shared_audio_submit, new_shared_audio_submit, 1)
+        changed = True
+    if "    const msg = text.trim();\n" in text:
+        text = text.replace(
+            "    const msg = text.trim();\n",
+            "    const msg = stripAudioOnlyMessagePlaceholder(text).trim();\n",
+            1,
+        )
         changed = True
     if "  const nativeAudioUnavailableReason = !modelLoaded\n" not in text:
         text = _replace_once(
@@ -3871,6 +4564,556 @@ def _apply_native_audio_shared_composer_shim(frontend: Path) -> bool:
     return changed
 
 
+def _apply_assistant_prefix_continuation_utils_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "features" / "chat" / "utils" / "update-thread-message.ts"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    changed = False
+    if "extractAssistantContinuationPrefixText" not in text:
+        text = _replace_once(
+            text,
+            """  return parts;
+}
+
+export async function updateThreadMessage(args: {
+""",
+            """  return parts;
+}
+
+export function extractAssistantContinuationPrefixText(text: string): string {
+  return parseTaggedTextToContent(text)
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\\n\\n")
+    .trimStart();
+}
+
+export async function updateThreadMessage(args: {
+""",
+            target,
+            "assistant continuation text-only prefix helper",
+        )
+        changed = True
+    if changed:
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return changed
+
+
+def _apply_assistant_prefix_continuation_thread_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "components" / "assistant-ui" / "thread.tsx"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    changed = False
+    old_import = 'import { extractTaggedText, updateThreadMessage } from "@/features/chat/utils/update-thread-message";\n'
+    new_import = 'import { extractAssistantContinuationPrefixText, extractTaggedText, updateThreadMessage } from "@/features/chat/utils/update-thread-message";\n'
+    if old_import in text:
+        text = text.replace(old_import, new_import, 1)
+        changed = True
+    if ASSISTANT_PREFIX_CONTINUATION_SHIM_MARKER not in text:
+        text = _replace_once(
+            text,
+            "/**\n * AssistantMessage handles the display and inline-editing of AI responses.\n",
+            (
+                "function normalizeAssistantContinuationPrefix(text: string): string {\n"
+                f"  // {ASSISTANT_PREFIX_CONTINUATION_SHIM_MARKER}: prefill uses visible answer text only.\n"
+                "  return extractAssistantContinuationPrefixText(text)\n"
+                '    .replaceAll("<THINK>", "<think>")\n'
+                '    .replaceAll("</THINK>", "</think>");\n'
+                "}\n\n"
+                "/**\n * AssistantMessage handles the display and inline-editing of AI responses.\n"
+            ),
+            target,
+            "assistant continuation prefix normalizer",
+        )
+        changed = True
+    elif 'return text.replaceAll("<THINK>", "<think>").replaceAll("</THINK>", "</think>");' in text:
+        text = text.replace(
+            '  // UNSLOTH_ASSISTANT_PREFIX_CONTINUATION_SHIM: edit text uses tagged-text exports.\n'
+            '  return text.replaceAll("<THINK>", "<think>").replaceAll("</THINK>", "</think>");\n',
+            '  // UNSLOTH_ASSISTANT_PREFIX_CONTINUATION_SHIM: prefill uses visible answer text only.\n'
+            '  return extractAssistantContinuationPrefixText(text)\n'
+            '    .replaceAll("<THINK>", "<think>")\n'
+            '    .replaceAll("</THINK>", "</think>");\n',
+            1,
+        )
+        changed = True
+    if "const messageParentId = useAuiState(({ message }) => message.parentId);" not in text:
+        text = _replace_once(
+            text,
+            "  const messageId = useAuiState(({ message }) => message.id);\n",
+            "  const messageId = useAuiState(({ message }) => message.id);\n"
+            "  const messageParentId = useAuiState(({ message }) => message.parentId);\n",
+            target,
+            "assistant continuation message parent id",
+        )
+        changed = True
+    old_handle_save = (
+        "  const handleSave = async () => {\n"
+        '    const finalText = textareaRef.current?.value || "";\n'
+        "    \n"
+        "    // Prioritize the specific thread item ID, then fallback to the global active thread ID\n"
+        "    const remoteId = aui.threadListItem().getState().remoteId \n"
+        "                  || useChatRuntimeStore.getState().activeThreadId;\n"
+        "\n"
+        '    if (!remoteId || remoteId === "" || remoteId === "/") {\n'
+        '      toast.error("Save failed: No thread ID found.");\n'
+        "      setEditingId(null);\n"
+        "      return;\n"
+        "    }\n"
+        "\n"
+        "    try {\n"
+        "      await updateThreadMessage({\n"
+        "        thread: { \n"
+        "          export: () => aui.thread().export(), \n"
+        "          import: (data) => aui.thread().import(data) \n"
+        "        },\n"
+        "        messageId,\n"
+        "        remoteId,\n"
+        "        newText: finalText,\n"
+        "        isIncognito: incognito,\n"
+        "      });\n"
+        "    } catch (error) {\n"
+        '      console.error("UI: Error during save:", error);\n'
+        '      toast.error("Failed to save message edits.");\n'
+        "    } finally {\n"
+        "      setEditingId(null);\n"
+        "    }\n"
+        "  };\n"
+    )
+    new_handle_save = """  const [isSavingEdit, setIsSavingEdit] = useState(false);
+
+  const saveEditedResponse = async (): Promise<string | null> => {
+    const finalText = textareaRef.current?.value || "";
+
+    // Prioritize the specific thread item ID, then fallback to the global active thread ID
+    const remoteId = aui.threadListItem().getState().remoteId
+                  || useChatRuntimeStore.getState().activeThreadId;
+
+    if (!remoteId || remoteId === "" || remoteId === "/") {
+      toast.error("Save failed: No thread ID found.");
+      setEditingId(null);
+      return null;
+    }
+
+    setIsSavingEdit(true);
+    try {
+      await updateThreadMessage({
+        thread: {
+          export: () => aui.thread().export(),
+          import: (data) => aui.thread().import(data)
+        },
+        messageId,
+        remoteId,
+        newText: finalText,
+        isIncognito: incognito,
+      });
+      return finalText;
+    } catch (error) {
+      console.error("UI: Error during save:", error);
+      toast.error("Failed to save message edits.");
+      return null;
+    } finally {
+      setIsSavingEdit(false);
+      setEditingId(null);
+    }
+  };
+
+  const handleSave = async () => {
+    await saveEditedResponse();
+  };
+
+  const handleSaveAndContinue = async () => {
+    const finalText = await saveEditedResponse();
+    if (finalText === null) return;
+    aui.thread().startRun({
+      parentId: messageParentId,
+      sourceId: messageId,
+      runConfig: {
+        custom: {
+          assistantContinuationMode: "prefix",
+          assistantPrefix: normalizeAssistantContinuationPrefix(finalText),
+          assistantPrefixSourceMessageId: messageId,
+        },
+      },
+    });
+  };
+"""
+    if old_handle_save in text:
+        text = text.replace(old_handle_save, new_handle_save, 1)
+        changed = True
+    if "const messageRuntime = aui.message();" in text:
+        text = text.replace("    const messageRuntime = aui.message();\n", "", 1)
+        changed = True
+    if "messageRuntime.reload({" in text:
+        text = text.replace(
+            "    messageRuntime.reload({\n"
+            "      runConfig: {\n",
+            "    aui.thread().startRun({\n"
+            "      parentId: messageParentId,\n"
+            "      sourceId: messageId,\n"
+            "      runConfig: {\n",
+            1,
+        )
+        changed = True
+    if "void handleSaveAndContinue();" not in text:
+        text = _replace_once(
+            text,
+            """                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                  handleSave();
+                }
+""",
+            """                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                  if (e.shiftKey) {
+                    void handleSaveAndContinue();
+                  } else {
+                    void handleSave();
+                  }
+                }
+""",
+            target,
+            "assistant edit save keyboard shortcut",
+        )
+        changed = True
+    if "Save & Continue" not in text:
+        text = _replace_once(
+            text,
+            """              <Button size="sm" variant="ghost" onClick={() => setEditingId(null)} className="h-8 text-xs">Cancel</Button>
+              <Button size="sm" onClick={handleSave} className="h-8 text-xs">Save</Button>
+""",
+            """              <Button size="sm" variant="ghost" disabled={isSavingEdit} onClick={() => setEditingId(null)} className="h-8 text-xs">Cancel</Button>
+              <Button size="sm" variant="secondary" disabled={isSavingEdit} onClick={handleSaveAndContinue} className="h-8 text-xs">Save & Continue</Button>
+              <Button size="sm" disabled={isSavingEdit} onClick={handleSave} className="h-8 text-xs">Save</Button>
+""",
+            target,
+            "assistant edit save and continue button",
+        )
+        changed = True
+    if changed:
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return changed
+
+
+def _apply_assistant_prefix_continuation_adapter_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "features" / "chat" / "api" / "chat-adapter.ts"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    changed = False
+    if ASSISTANT_PREFIX_CONTINUATION_SHIM_MARKER not in text:
+        text = _replace_once(
+            text,
+            "function collectTextParts(message: RunMessage): string[] {\n",
+            (
+                f"// {ASSISTANT_PREFIX_CONTINUATION_SHIM_MARKER}: /asst starts an assistant prefill branch.\n"
+                "function parseAssistantPrefillCommand(text: string): string | null {\n"
+                '  const match = text.match(/^\\s*\\/asst(?:\\s+([\\s\\S]*))?$/i);\n'
+                "  if (!match) return null;\n"
+                "  return (match[1] ?? \"\").trimStart();\n"
+                "}\n\n"
+                "function isAssistantPrefillCommandMessage(message: RunMessage): boolean {\n"
+                '  if (message.role !== "user") return false;\n'
+                "  const textParts = collectTextParts(message);\n"
+                "  return textParts.length === 1 && parseAssistantPrefillCommand(textParts[0]) !== null;\n"
+                "}\n\n"
+                "function collectLatestAssistantPrefillCommand(messages: RunMessages): string | null {\n"
+                "  const latest = messages.at(-1);\n"
+                '  if (!latest || latest.role !== "user") return null;\n'
+                "  const textParts = collectTextParts(latest);\n"
+                "  if (textParts.length !== 1) return null;\n"
+                "  return parseAssistantPrefillCommand(textParts[0]);\n"
+                "}\n\n"
+                "function collectTextParts(message: RunMessage): string[] {\n"
+            ),
+            target,
+            "assistant prefix command helpers",
+        )
+        changed = True
+    if "async *run({ messages, runConfig, abortSignal, unstable_threadId })" not in text:
+        text = _replace_once(
+            text,
+            "    async *run({ messages, abortSignal, unstable_threadId }) {\n",
+            "    async *run({ messages, runConfig, abortSignal, unstable_threadId }) {\n",
+            target,
+            "adapter runConfig argument",
+        )
+        changed = True
+    if "const requestedAssistantContinuationPrefix" not in text:
+        text = _replace_once(
+            text,
+            "      let runtime = useChatRuntimeStore.getState();\n",
+            (
+                "      let runtime = useChatRuntimeStore.getState();\n"
+                "      const runConfigAssistantPrefix =\n"
+                "        runConfig?.custom?.assistantContinuationMode === \"prefix\" &&\n"
+                "        typeof runConfig.custom.assistantPrefix === \"string\"\n"
+                "          ? runConfig.custom.assistantPrefix\n"
+                "          : \"\";\n"
+                "      const slashCommandAssistantPrefix =\n"
+                "        collectLatestAssistantPrefillCommand(messages) ?? \"\";\n"
+                "      const requestedAssistantContinuationPrefix =\n"
+                "        runConfigAssistantPrefix || slashCommandAssistantPrefix;\n"
+            ),
+            target,
+            "assistant prefix run config",
+        )
+        changed = True
+    if "return [{ role: \"user\", content: \"\" }];" not in text:
+        text = _replace_once(
+            text,
+            """  if (message.role === "assistant") {
+    return serializeAssistantReplayMessages(message);
+  }
+""",
+            """  if (isAssistantPrefillCommandMessage(message)) {
+    return [{ role: "user", content: "" }];
+  }
+
+  if (message.role === "assistant") {
+    return serializeAssistantReplayMessages(message);
+  }
+""",
+            target,
+            "bridge assistant prefix slash commands",
+        )
+        changed = True
+    old_drop_block = """      for (const message of messages) {
+        if (isAssistantPrefillCommandMessage(message)) {
+          continue;
+        }
+        if (isAnthropicRefusalMessage(message)) {
+          const last = survivingMessages.at(-1);
+          if (last && last.role === "user") {
+            survivingMessages.pop();
+          }
+          continue;
+        }
+        survivingMessages.push(message);
+      }
+"""
+    if old_drop_block in text:
+        text = _replace_once(
+            text,
+            old_drop_block,
+            """      for (const message of messages) {
+        if (isAnthropicRefusalMessage(message)) {
+          const last = survivingMessages.at(-1);
+          if (last && last.role === "user") {
+            survivingMessages.pop();
+          }
+          continue;
+        }
+        survivingMessages.push(message);
+      }
+""",
+            target,
+            "keep assistant prefix slash command bridge messages",
+        )
+        changed = True
+    if "content: requestedAssistantContinuationPrefix" not in text:
+        text = _replace_once(
+            text,
+            """      const outboundMessages = survivingMessages
+        .flatMap(toOpenAIMessages)
+        .filter((message): message is NonNullable<typeof message> =>
+          Boolean(message),
+        );
+""",
+            """      const outboundMessages = survivingMessages
+        .flatMap(toOpenAIMessages)
+        .filter((message): message is NonNullable<typeof message> =>
+          Boolean(message),
+        );
+      if (requestedAssistantContinuationPrefix) {
+        outboundMessages.push({
+          role: "assistant",
+          content: requestedAssistantContinuationPrefix,
+        });
+      }
+""",
+            target,
+            "append assistant prefix prefill message",
+        )
+        changed = True
+    if "const lastOutboundRole = outboundMessages.at(-1)?.role;" not in text:
+        text = _replace_once(
+            text,
+            """      if (requestedAssistantContinuationPrefix) {
+        outboundMessages.push({
+          role: "assistant",
+          content: requestedAssistantContinuationPrefix,
+        });
+      }
+""",
+            """      if (requestedAssistantContinuationPrefix) {
+        const lastOutboundRole = outboundMessages.at(-1)?.role;
+        if (lastOutboundRole !== "user" && lastOutboundRole !== "tool") {
+          outboundMessages.push({ role: "user", content: "" });
+        }
+        outboundMessages.push({
+          role: "assistant",
+          content: requestedAssistantContinuationPrefix,
+        });
+      }
+""",
+            target,
+            "guard assistant prefix with bridge user message",
+        )
+        changed = True
+    if "let cumulativeText = requestedAssistantContinuationPrefix;" not in text:
+        text = _replace_once(
+            text,
+            '      let cumulativeText = "";\n',
+            "      let cumulativeText = requestedAssistantContinuationPrefix;\n",
+            target,
+            "seed assistant stream with prefix",
+        )
+        changed = True
+    if "pendingAssistantContinuationPrefixEcho" not in text:
+        text = _replace_once(
+            text,
+            "      let cumulativeText = requestedAssistantContinuationPrefix;\n",
+            (
+                "      let cumulativeText = requestedAssistantContinuationPrefix;\n"
+                "      let pendingAssistantContinuationPrefixEcho = requestedAssistantContinuationPrefix;\n"
+                "      const stripAssistantContinuationPrefixEcho = (text: string): string => {\n"
+                "        if (!pendingAssistantContinuationPrefixEcho || !text) return text;\n"
+                "        if (pendingAssistantContinuationPrefixEcho.startsWith(text)) {\n"
+                "          pendingAssistantContinuationPrefixEcho =\n"
+                "            pendingAssistantContinuationPrefixEcho.slice(text.length);\n"
+                "          return \"\";\n"
+                "        }\n"
+                "        if (text.startsWith(pendingAssistantContinuationPrefixEcho)) {\n"
+                "          const stripped = text.slice(\n"
+                "            pendingAssistantContinuationPrefixEcho.length,\n"
+                "          );\n"
+                "          pendingAssistantContinuationPrefixEcho = \"\";\n"
+                "          return stripped;\n"
+                "        }\n"
+                "        pendingAssistantContinuationPrefixEcho = \"\";\n"
+                "        return text;\n"
+                "      };\n"
+            ),
+            target,
+            "strip echoed assistant prefix from stream",
+        )
+        changed = True
+    if "if (requestedAssistantContinuationPrefix) {\n        yield {" not in text:
+        text = _replace_once(
+            text,
+            """        return pinTextThoughtSignature(assembled);
+      };
+      const parseToolProvenance = (
+""",
+            """        return pinTextThoughtSignature(assembled);
+      };
+      if (requestedAssistantContinuationPrefix) {
+        yield {
+          content: buildAssistantContent(cumulativeText),
+          metadata: {
+            timing: buildTiming(streamStartTime, totalChunks, firstTokenTime),
+            custom: { reasoningDuration },
+          },
+        };
+      }
+      const parseToolProvenance = (
+""",
+            target,
+            "yield initial assistant prefix",
+        )
+        changed = True
+    if "stripAssistantContinuationPrefixEcho(delta)" not in text:
+        text = _replace_once(
+            text,
+            """              if (delta) {
+                closeReasoningContent();
+                cumulativeText += delta;
+              }
+""",
+            """              if (delta) {
+                closeReasoningContent();
+                const strippedDelta = stripAssistantContinuationPrefixEcho(delta);
+                if (strippedDelta) {
+                  cumulativeText += strippedDelta;
+                }
+              }
+""",
+            target,
+            "apply assistant prefix echo stripper",
+        )
+        changed = True
+    if changed:
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return changed
+
+
+def _apply_assistant_ui_source_id_reload_shim(frontend: Path) -> bool:
+    targets = (
+        frontend
+        / "node_modules"
+        / "@assistant-ui"
+        / "core"
+        / "src"
+        / "runtimes"
+        / "local"
+        / "local-thread-runtime-core.ts",
+        frontend
+        / "node_modules"
+        / "@assistant-ui"
+        / "core"
+        / "dist"
+        / "runtimes"
+        / "local"
+        / "local-thread-runtime-core.js",
+    )
+    changed = False
+    for target in targets:
+        if not target.exists():
+            echo(f"  assistant-ui runtime package file not found; skipping {target.name}")
+            continue
+        text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+        if "sourceId, runConfig" in text and "const id = sourceId ?? generateId();" in text:
+            continue
+        if target.suffix == ".ts":
+            text = _replace_once(
+                text,
+                "  public async startRun(\n"
+                "    { parentId, runConfig }: StartRunConfig,\n",
+                "  public async startRun(\n"
+                "    { parentId, sourceId, runConfig }: StartRunConfig,\n",
+                target,
+                "assistant-ui sourceId reload argument",
+            )
+        else:
+            text = _replace_once(
+                text,
+                "    async startRun({ parentId, runConfig }, runCallback) {\n",
+                "    async startRun({ parentId, sourceId, runConfig }, runCallback) {\n",
+                target,
+                "assistant-ui sourceId reload argument",
+            )
+        text = _replace_once(
+            text,
+            "        const id = generateId();\n",
+            "        const id = sourceId ?? generateId();\n",
+            target,
+            "assistant-ui sourceId reload id reuse",
+        )
+        target.write_text(text, encoding="utf-8", newline="\n")
+        changed = True
+    return changed
+
+
+def apply_assistant_prefix_continuation_shim(studio_home: Path) -> None:
+    frontend = studio_package_dir(studio_home) / "frontend"
+    if not frontend.exists():
+        raise FileNotFoundError(f"Missing frontend at {frontend}")
+    changed = False
+    changed |= _apply_assistant_ui_source_id_reload_shim(frontend)
+    changed |= _apply_assistant_prefix_continuation_utils_shim(frontend)
+    changed |= _apply_assistant_prefix_continuation_thread_shim(frontend)
+    changed |= _apply_assistant_prefix_continuation_adapter_shim(frontend)
+    if changed:
+        echo("  applied assistant prefix continuation shim to Studio web UI")
+    else:
+        echo("  assistant prefix continuation shim already present")
+
+
 def apply_native_audio_mic_shim(studio_home: Path, *, build_frontend: bool = False) -> None:
     frontend = studio_package_dir(studio_home) / "frontend"
     if not frontend.exists():
@@ -3882,8 +5125,10 @@ def apply_native_audio_mic_shim(studio_home: Path, *, build_frontend: bool = Fal
     changed |= _apply_asr_fallback_backend_route_shim(studio_home)
     changed |= _apply_native_audio_backend_settings_shim(studio_home)
     changed |= _apply_native_audio_frontend_api_shim(frontend)
+    changed |= _apply_audio_only_placeholder_chat_adapter_shim(frontend)
     changed |= _apply_native_audio_settings_storage_shim(frontend)
     changed |= _apply_native_audio_runtime_store_shim(frontend)
+    changed |= _apply_gemma_recommended_preset_shim(frontend)
     changed |= _apply_native_audio_settings_panel_shim(frontend)
     changed |= _apply_native_audio_thread_shim(frontend)
     changed |= _apply_native_audio_shared_composer_shim(frontend)
@@ -3898,6 +5143,29 @@ def apply_native_audio_mic_shim(studio_home: Path, *, build_frontend: bool = Fal
     else:
         echo("  native audio mic shim already present")
     if build_frontend:
+        echo("  rebuilding Studio frontend...")
+        completed = subprocess.run(["npm.cmd", "run", "build"], cwd=frontend)
+        if completed.returncode != 0:
+            raise SystemExit(completed.returncode)
+
+
+def apply_studio_patch_stack(studio_home: Path, *, build_frontend: bool = False) -> None:
+    restore_studio_patch_base(studio_home)
+    echo("  applying Studio patch stack in fixed order")
+    apply_llama_local_zip_shim(studio_home)
+    apply_chat_template_override_shim(studio_home)
+    apply_speculative_type_shim(studio_home)
+    apply_cli_api_key_reuse_shim(studio_home)
+    apply_openai_reasoning_passthrough_shim(studio_home)
+    apply_openai_request_autoload_shim_v2(studio_home)
+    apply_openai_autoload_speculative_shim(studio_home)
+    apply_web_ui_tool_policy_shim(studio_home)
+    apply_embedding_extra_args_shim(studio_home)
+    apply_fixed_llama_port_shim(studio_home)
+    apply_native_audio_mic_shim(studio_home, build_frontend=False)
+    apply_assistant_prefix_continuation_shim(studio_home)
+    if build_frontend:
+        frontend = studio_package_dir(studio_home) / "frontend"
         echo("  rebuilding Studio frontend...")
         completed = subprocess.run(["npm.cmd", "run", "build"], cwd=frontend)
         if completed.returncode != 0:
@@ -4090,14 +5358,8 @@ def setup(args: argparse.Namespace) -> None:
     python = resolve_studio_python(studio_home)
     llama_dir = studio_home / "llama.cpp"
 
-    echo("\n[1/6] Patching llama.cpp prebuilt installer (local-zip shim)...")
-    apply_llama_local_zip_shim(studio_home)
-    apply_chat_template_override_shim(studio_home)
-    apply_cli_api_key_reuse_shim(studio_home)
-    apply_openai_reasoning_passthrough_shim(studio_home)
-    apply_openai_request_autoload_shim_v2(studio_home)
-    apply_embedding_extra_args_shim(studio_home)
-    apply_native_audio_mic_shim(studio_home, build_frontend=False)
+    echo("\n[1/6] Applying deterministic Studio patch stack...")
+    apply_studio_patch_stack(studio_home, build_frontend=False)
 
     echo(f"\n[2/6] Locating prebuilt zips in {zip_dir} ...")
     bin_zip, cudart_zip = find_llama_zips(zip_dir, args.release_tag, args.runtime)
@@ -4140,12 +5402,7 @@ def setup(args: argparse.Namespace) -> None:
     else:
         env.pop("SKIP_STUDIO_BASE", None)
     run([unsloth, "studio", "setup", "--verbose"], env=env)
-    apply_chat_template_override_shim(studio_home)
-    apply_cli_api_key_reuse_shim(studio_home)
-    apply_openai_reasoning_passthrough_shim(studio_home)
-    apply_openai_request_autoload_shim_v2(studio_home)
-    apply_embedding_extra_args_shim(studio_home)
-    apply_native_audio_mic_shim(studio_home, build_frontend=True)
+    apply_studio_patch_stack(studio_home, build_frontend=True)
 
     if args.register_model_root:
         echo(f"\n[5/6] Registering model folder {model_root} as a Studio scan folder...")
@@ -4164,14 +5421,19 @@ def setup(args: argparse.Namespace) -> None:
 def serve(args: argparse.Namespace) -> None:
     studio_home = Path(args.studio_home)
     unsloth = resolve_unsloth_exe(studio_home)
-    apply_chat_template_override_shim(studio_home)
-    apply_speculative_type_shim(studio_home)
-    apply_cli_api_key_reuse_shim(studio_home)
-    apply_openai_reasoning_passthrough_shim(studio_home)
-    apply_openai_request_autoload_shim_v2(studio_home)
-    apply_openai_autoload_speculative_shim(studio_home)
-    apply_embedding_extra_args_shim(studio_home)
-    apply_native_audio_mic_shim(studio_home, build_frontend=args.patch_web)
+    source_repo = resolve_unsloth_source_repo(args.source_repo)
+    if source_repo is not None:
+        prepare_unsloth_source_repo(
+            source_repo,
+            build_frontend=args.source_build_frontend,
+        )
+        if args.source_apply_shims:
+            echo("  source mode requested with shim patch stack enabled")
+            apply_studio_patch_stack(studio_home, build_frontend=args.patch_web)
+        else:
+            echo("  source mode active; skipping win-models Studio shim patch stack")
+    else:
+        apply_studio_patch_stack(studio_home, build_frontend=args.patch_web)
     if args.parallel < 1:
         raise ValueError("--parallel must be at least 1")
     bind_host = "0.0.0.0" if args.lan else args.host
@@ -4192,6 +5454,11 @@ def serve(args: argparse.Namespace) -> None:
     env["ENVIRONMENT_TYPE"] = "production"
     env["UNSLOTH_DEFAULT_MODEL"] = model
     env["UNSLOTH_CONTEXT_LENGTH"] = str(args.max_seq_length)
+    if source_repo is not None:
+        configure_unsloth_source_env(env, source_repo)
+    if args.llama_port > 0:
+        env["UNSLOTH_LLAMA_PORT"] = str(args.llama_port)
+        env["WIN_MODELS_LLAMA_PORT"] = str(args.llama_port)
     env["UNSLOTH_AUTOLOAD_LOAD_IN_4BIT"] = "1"
     if args.hf_cache_dir:
         hf_cache_dir = Path(args.hf_cache_dir)
@@ -4249,15 +5516,17 @@ def serve(args: argparse.Namespace) -> None:
     embed_args = embedding_llama_args(model)
     if embed_args:
         command.extend(embed_args)
-    if args.enable_tools:
+    if args.enable_tools is True:
         command.append("--enable-tools")
-    else:
+    elif args.enable_tools is False:
         command.append("--disable-tools")
     if args.verbose_llama:
         command.append("--verbose")
 
     echo(f"Starting Unsloth Studio on http://{bind_host}:{args.port}  (LOG_LEVEL={args.log_level})")
     echo(f"Context length={args.max_seq_length}; parallel slots={args.parallel}; per-slot context={args.max_seq_length // args.parallel}")
+    if args.llama_port > 0:
+        echo(f"llama-server fixed port: {args.llama_port}")
     if args.max_seq_length > 0:
         echo(f"llama-server context override: -c {args.max_seq_length}")
     if args.cache_type_kv:
@@ -4270,6 +5539,16 @@ def serve(args: argparse.Namespace) -> None:
         echo(f"llama-server embedding mode: {' '.join(embed_args)}")
     if args.chat_template_file:
         echo(f"Studio chat template override: {Path(args.chat_template_file).resolve()}")
+    if source_repo is not None:
+        echo(f"Unsloth source mode: {source_repo}")
+        if not args.source_apply_shims:
+            echo("Studio shim patch stack: skipped")
+    if args.enable_tools is True:
+        echo("Studio tool policy: forced on for web UI requests; generated API keys remain blocked.")
+    elif args.enable_tools is False:
+        echo("Studio tool policy: forced off for web UI and API requests.")
+    else:
+        echo("Studio tool policy: web UI may opt in; generated API keys cannot enable server-side tools.")
     echo("Backend output will stream in this terminal. Press Ctrl+C to stop.")
     echo(f"llama-server log: {studio_home}\\logs\\llama-server\\llama-*-port-*.log")
     if args.lan:
@@ -4278,6 +5557,19 @@ def serve(args: argparse.Namespace) -> None:
         echo(f"Opening http://localhost:{args.port}; refresh once Studio finishes starting if needed.")
         open_url(f"http://localhost:{args.port}")
     run(command, env=env)
+
+
+def prepare_source(args: argparse.Namespace) -> None:
+    source_repo = resolve_unsloth_source_repo(args.source_repo)
+    if source_repo is None:
+        raise ValueError(
+            "No source repo configured. Pass --source-repo or set UNSLOTH_SOURCE_REPO."
+        )
+    prepare_unsloth_source_repo(
+        source_repo,
+        build_frontend=args.build_frontend,
+    )
+    echo("Source repo is ready for: win-models unsloth serve --source-repo <path>")
 
 
 def stop(args: argparse.Namespace) -> None:
@@ -4326,7 +5618,7 @@ def register(args: argparse.Namespace) -> None:
 def patch_web(args: argparse.Namespace) -> None:
     studio_home = Path(args.studio_home)
     resolve_studio_python(studio_home)
-    apply_native_audio_mic_shim(studio_home, build_frontend=not args.no_build)
+    apply_studio_patch_stack(studio_home, build_frontend=not args.no_build)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -4361,10 +5653,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--speculative-type", choices=("auto", "off", "mtp", "mtp+ngram", "ngram"), default="")
     p.add_argument("--chat-template-file", default="")
     p.add_argument("--port", type=int, default=DEFAULT_STUDIO_PORT)
+    p.add_argument("--llama-port", type=int, default=DEFAULT_LLAMA_PORT)
     p.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
     p.add_argument("--lan", action="store_true")
     p.add_argument("--open", action="store_true")
-    p.add_argument("--enable-tools", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--source-repo", default=os.environ.get("UNSLOTH_SOURCE_REPO", ""))
+    p.add_argument(
+        "--source-build-frontend",
+        action=argparse.BooleanOptionalAction,
+        default=os.environ.get("UNSLOTH_SOURCE_BUILD_FRONTEND", "").lower()
+        in {"1", "true", "yes", "on"},
+    )
+    p.add_argument(
+        "--source-apply-shims",
+        action="store_true",
+        help="Apply the win-models shim patch stack even when --source-repo is active.",
+    )
+    tools_policy = p.add_mutually_exclusive_group()
+    tools_policy.add_argument("--enable-tools", dest="enable_tools", action="store_true", default=None)
+    tools_policy.add_argument("--disable-tools", dest="enable_tools", action="store_false")
+    tools_policy.add_argument("--no-enable-tools", dest="enable_tools", action="store_false", help=argparse.SUPPRESS)
     p.add_argument("--verbose-llama", action="store_true")
     p.add_argument("--patch-web", action=argparse.BooleanOptionalAction, default=False)
     p.set_defaults(func=serve)
@@ -4378,6 +5686,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path")
     p.add_argument("--studio-home", default=str(DEFAULT_STUDIO_HOME))
     p.set_defaults(func=register)
+
+    p = sub.add_parser("prepare-source")
+    p.add_argument("--source-repo", default=os.environ.get("UNSLOTH_SOURCE_REPO", ""))
+    p.add_argument("--build-frontend", action="store_true")
+    p.set_defaults(func=prepare_source)
 
     p = sub.add_parser("patch-web")
     p.add_argument("--studio-home", default=str(DEFAULT_STUDIO_HOME))

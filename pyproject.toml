@@ -5,6 +5,7 @@ description = "Local Windows model server helpers for llama.cpp and Unsloth Stud
 requires-python = ">=3.11"
 dependencies = [
     "huggingface-hub>=0.30,<0.31",
+    "jinja2>=3.1,<4",
 ]
 
 [project.scripts]
