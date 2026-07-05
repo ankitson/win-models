@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -13,15 +14,334 @@ from .common import echo, ensure_dir, open_url, powershell, run
 from .config import DEFAULT_MODEL_ROOT, DEFAULT_STUDIO_HOME, DEFAULT_STUDIO_PORT
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_ZIP_MARKER = "UNSLOTH_LOCAL_ZIP_SHIM"
 CHAT_TEMPLATE_OVERRIDE_SHIM_MARKER = "UNSLOTH_CHAT_TEMPLATE_OVERRIDE_SHIM"
+SPECULATIVE_TYPE_SHIM_MARKER = "UNSLOTH_SPECULATIVE_TYPE_SHIM"
 CLI_API_KEY_REUSE_SHIM_MARKER = "UNSLOTH_CLI_API_KEY_REUSE_SHIM"
 OPENAI_REASONING_PASSTHROUGH_SHIM_MARKER = "UNSLOTH_OPENAI_REASONING_PASSTHROUGH_SHIM"
 EMBEDDING_EXTRA_ARGS_SHIM_MARKER = "UNSLOTH_EMBEDDING_EXTRA_ARGS_SHIM"
 OPENAI_REQUEST_AUTOLOAD_SHIM_MARKER = "UNSLOTH_OPENAI_REQUEST_AUTOLOAD_SHIM"
+OPENAI_AUTOLOAD_SPECULATIVE_SHIM_MARKER = "UNSLOTH_OPENAI_AUTOLOAD_SPECULATIVE_SHIM"
+NATIVE_AUDIO_MIC_SHIM_MARKER = "UNSLOTH_NATIVE_AUDIO_MIC_SHIM"
+ASR_FALLBACK_SHIM_MARKER = "UNSLOTH_ASR_FALLBACK_SHIM"
+TAILWIND_SAFE_SOURCE_SHIM_MARKER = "UNSLOTH_TAILWIND_SAFE_SOURCE_SHIM"
 DEFAULT_MCP_CONFIG = (
     Path(__file__).resolve().parents[1] / "unsloth" / "mcp-servers.json"
 )
+
+
+def load_dotenv_secret() -> None:
+    paths = [Path.cwd() / ".env.secret", REPO_ROOT / ".env.secret"]
+    seen: set[Path] = set()
+    for path in paths:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if resolved in seen or not path.is_file():
+            continue
+        seen.add(resolved)
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            name, value = stripped.split("=", 1)
+            name = name.strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                continue
+            if os.environ.get(name):
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            os.environ[name] = value
+
+    if os.environ.get("MCPPROXY_AGENT_TOKEN") and not os.environ.get(
+        "MCPPROXY_AGENTS_TOKEN"
+    ):
+        os.environ["MCPPROXY_AGENTS_TOKEN"] = os.environ["MCPPROXY_AGENT_TOKEN"]
+
+
+NATIVE_AUDIO_RECORDER_TS = """// SPDX-License-Identifier: AGPL-3.0-only
+// UNSLOTH_NATIVE_AUDIO_MIC_SHIM: browser microphone capture for native audio-input models.
+
+import { fileToBase64, MAX_AUDIO_SIZE } from "@/lib/audio-utils";
+import { toast } from "@/lib/toast";
+import { useCallback, useEffect, useRef, useState } from "react";
+
+export type NativeAudioRecorderStatus = "idle" | "recording" | "processing";
+
+const MIME_CANDIDATES = [
+  "audio/webm;codecs=opus",
+  "audio/webm",
+  "audio/ogg;codecs=opus",
+  "audio/ogg",
+  "audio/mp4",
+];
+const MIN_RECORDING_SECONDS = 5;
+const MAX_RECORDING_SECONDS = 600;
+const DEFAULT_RECORDING_SECONDS = 120;
+const GEMMA_NATIVE_AUDIO_RECORDING_SECONDS = 30;
+const WARNING_SECONDS = 5;
+
+function clampRecordingSeconds(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_RECORDING_SECONDS;
+  return Math.min(
+    MAX_RECORDING_SECONDS,
+    Math.max(MIN_RECORDING_SECONDS, Math.round(value)),
+  );
+}
+
+export function getEffectiveVoiceRecordingMaxSeconds(
+  configuredSeconds: number,
+  model?: { id?: string; name?: string; hasAudioInput?: boolean } | null,
+): number {
+  const configured = clampRecordingSeconds(configuredSeconds);
+  const label = `${model?.id ?? ""} ${model?.name ?? ""}`.toLowerCase();
+  if (model?.hasAudioInput && label.includes("gemma")) {
+    return Math.min(configured, GEMMA_NATIVE_AUDIO_RECORDING_SECONDS);
+  }
+  return configured;
+}
+
+function pickMimeType(): string | undefined {
+  if (typeof MediaRecorder === "undefined") {
+    return undefined;
+  }
+  return MIME_CANDIDATES.find((type) => MediaRecorder.isTypeSupported(type));
+}
+
+function extensionForMimeType(mimeType: string): string {
+  if (mimeType.includes("ogg")) return "ogg";
+  if (mimeType.includes("mp4")) return "m4a";
+  if (mimeType.includes("wav")) return "wav";
+  return "webm";
+}
+
+function stopStream(stream: MediaStream | null): void {
+  for (const track of stream?.getTracks() ?? []) {
+    track.stop();
+  }
+}
+
+function playWarningBeep(): void {
+  try {
+    const AudioContextCtor =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AudioContextCtor) return;
+    const ctx = new AudioContextCtor();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.18, ctx.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.28);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.3);
+    window.setTimeout(() => void ctx.close(), 500);
+  } catch {
+    // Best-effort cue only.
+  }
+}
+
+export function useNativeAudioRecorder(
+  onAudioReady: (base64: string, name: string) => void,
+  maxSeconds: number,
+): {
+  status: NativeAudioRecorderStatus;
+  supported: boolean;
+  secondsElapsed: number;
+  secondsLimit: number;
+  start: () => Promise<void>;
+  stop: () => void;
+} {
+  const [status, setStatus] = useState<NativeAudioRecorderStatus>("idle");
+  const [secondsElapsed, setSecondsElapsed] = useState(0);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const onAudioReadyRef = useRef(onAudioReady);
+  const timerRef = useRef<number | null>(null);
+  const startedAtRef = useRef(0);
+  const warningPlayedRef = useRef(false);
+  const secondsLimit = clampRecordingSeconds(maxSeconds);
+
+  useEffect(() => {
+    onAudioReadyRef.current = onAudioReady;
+  }, [onAudioReady]);
+
+  const supported =
+    typeof navigator !== "undefined" &&
+    Boolean(navigator.mediaDevices?.getUserMedia) &&
+    typeof MediaRecorder !== "undefined";
+
+  const clearTimer = useCallback(() => {
+    if (timerRef.current !== null) {
+      window.clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  const stop = useCallback(() => {
+    const recorder = recorderRef.current;
+    if (!recorder || recorder.state === "inactive") {
+      return;
+    }
+    setStatus("processing");
+    clearTimer();
+    recorder.stop();
+  }, [clearTimer]);
+
+  const startTimer = useCallback(
+    (limit: number) => {
+      clearTimer();
+      startedAtRef.current = Date.now();
+      warningPlayedRef.current = false;
+      setSecondsElapsed(0);
+      timerRef.current = window.setInterval(() => {
+        const elapsed = Math.floor((Date.now() - startedAtRef.current) / 1000);
+        setSecondsElapsed(Math.min(elapsed, limit));
+        const remaining = limit - elapsed;
+        if (
+          remaining <= WARNING_SECONDS &&
+          remaining > 0 &&
+          !warningPlayedRef.current
+        ) {
+          warningPlayedRef.current = true;
+          playWarningBeep();
+          toast.warning("Voice recording ending soon", {
+            description: `${remaining} seconds remaining before auto-stop.`,
+          });
+        }
+        if (elapsed >= limit) {
+          stop();
+        }
+      }, 250);
+    },
+    [clearTimer, stop],
+  );
+
+  const start = useCallback(async () => {
+    if (!supported) {
+      toast.error("Microphone recording is not supported in this browser.");
+      return;
+    }
+    if (status !== "idle") {
+      return;
+    }
+
+    try {
+      const limit = clampRecordingSeconds(maxSeconds);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      const mimeType = pickMimeType();
+      const recorder = new MediaRecorder(
+        stream,
+        mimeType ? { mimeType } : undefined,
+      );
+      chunksRef.current = [];
+      streamRef.current = stream;
+      recorderRef.current = recorder;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
+      };
+      recorder.onerror = () => {
+        clearTimer();
+        stopStream(streamRef.current);
+        streamRef.current = null;
+        recorderRef.current = null;
+        chunksRef.current = [];
+        setSecondsElapsed(0);
+        setStatus("idle");
+        toast.error("Microphone recording failed.");
+      };
+      recorder.onstop = async () => {
+        clearTimer();
+        setStatus("processing");
+        stopStream(streamRef.current);
+        streamRef.current = null;
+        recorderRef.current = null;
+
+        const blob = new Blob(chunksRef.current, {
+          type: recorder.mimeType || "audio/webm",
+        });
+        chunksRef.current = [];
+        setSecondsElapsed(0);
+        if (blob.size <= 0) {
+          setStatus("idle");
+          toast.error("No audio was recorded.");
+          return;
+        }
+        if (blob.size > MAX_AUDIO_SIZE) {
+          setStatus("idle");
+          toast.error("Audio size exceeds 50MB limit.");
+          return;
+        }
+
+        try {
+          const ext = extensionForMimeType(blob.type);
+          const name = `voice-${new Date()
+            .toISOString()
+            .replace(/[:.]/g, "-")}.${ext}`;
+          const file = new File([blob], name, { type: blob.type });
+          const base64 = await fileToBase64(file);
+          onAudioReadyRef.current(base64, name);
+          toast.success("Voice message recorded", {
+            description: "Press Send to use the voice message in this chat.",
+          });
+        } catch {
+          toast.error("Could not prepare the voice message.");
+        } finally {
+          setStatus("idle");
+        }
+      };
+
+      recorder.start();
+      setStatus("recording");
+      startTimer(limit);
+    } catch (error) {
+      clearTimer();
+      stopStream(streamRef.current);
+      streamRef.current = null;
+      recorderRef.current = null;
+      setSecondsElapsed(0);
+      setStatus("idle");
+      const message =
+        error instanceof DOMException && error.name === "NotAllowedError"
+          ? "Microphone permission was denied."
+          : "Could not start microphone recording.";
+      toast.error(message);
+    }
+  }, [clearTimer, maxSeconds, startTimer, status, supported]);
+
+  useEffect(() => {
+    return () => {
+      clearTimer();
+      const recorder = recorderRef.current;
+      if (recorder && recorder.state !== "inactive") {
+        recorder.stop();
+      }
+      stopStream(streamRef.current);
+    };
+  }, [clearTimer]);
+
+  return { status, supported, secondsElapsed, secondsLimit, start, stop };
+}
+"""
 
 
 def embedding_llama_args(model: str) -> list[str]:
@@ -230,6 +550,102 @@ def apply_chat_template_override_shim(studio_home: Path) -> None:
 
     target.write_text(text, encoding="utf-8", newline="\n")
     echo("  applied chat-template override shim to unsloth_cli.commands.studio")
+
+
+def apply_speculative_type_shim(studio_home: Path) -> None:
+    target = unsloth_cli_studio_command(studio_home)
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if SPECULATIVE_TYPE_SHIM_MARKER in text:
+        echo("  speculative-type shim already present")
+        return
+
+    signature_anchor = (
+        "    chat_template_override: Optional[str] = None,\n"
+        "    timeout: int = 600,\n"
+    )
+    if signature_anchor not in text:
+        raise RuntimeError(
+            f"Could not find _load_model_via_http speculative signature anchor in {target}; "
+            "the Studio CLI changed."
+        )
+    text = text.replace(
+        signature_anchor,
+        (
+            "    chat_template_override: Optional[str] = None,\n"
+            "    speculative_type: Optional[str] = None,\n"
+            "    timeout: int = 600,\n"
+        ),
+        1,
+    )
+
+    payload_anchor = (
+        "    if chat_template_override:\n"
+        "        payload[\"chat_template_override\"] = chat_template_override\n\n"
+    )
+    if payload_anchor not in text:
+        raise RuntimeError(
+            f"Could not find _load_model_via_http speculative payload anchor in {target}; "
+            "the Studio CLI changed."
+        )
+    text = text.replace(
+        payload_anchor,
+        (
+            payload_anchor
+            + "    if speculative_type:\n"
+            + "        payload[\"speculative_type\"] = speculative_type\n\n"
+        ),
+        1,
+    )
+
+    load_anchor = None
+    load_indent = ""
+    for candidate_indent in ("        ", "    "):
+        candidate = (
+            f"{candidate_indent}# 5. Load model via HTTP.\n"
+            f"{candidate_indent}if not silent:\n"
+            f"{candidate_indent}    typer.echo(f\"Loading model: {{model}}...\")\n"
+            f"{candidate_indent}try:\n"
+        )
+        if candidate in text:
+            load_anchor = candidate
+            load_indent = candidate_indent
+            break
+    if load_anchor is None:
+        raise RuntimeError(
+            f"Could not find Studio run speculative load anchor in {target}; "
+            "the Studio CLI changed."
+        )
+    speculative_read = (
+        f"{load_indent}# {SPECULATIVE_TYPE_SHIM_MARKER}: let win-models control\n"
+        f"{load_indent}# Studio's first-class speculative decoding mode.\n"
+        f"{load_indent}speculative_type = (os.environ.get(\"UNSLOTH_SPECULATIVE_TYPE\") or \"\").strip() or None\n"
+        f"{load_indent}if speculative_type and not silent:\n"
+        f"{load_indent}    typer.echo(f\"Using speculative decoding mode: {{speculative_type}}\")\n\n"
+    )
+    text = text.replace(load_anchor, speculative_read + load_anchor, 1)
+
+    call_anchor = "                chat_template_override = chat_template_override,\n"
+    if call_anchor not in text:
+        call_anchor = "            chat_template_override = chat_template_override,\n"
+    if call_anchor not in text:
+        raise RuntimeError(
+            f"Could not find _load_model_via_http speculative call anchor in {target}; "
+            "the Studio CLI changed."
+        )
+    text = text.replace(
+        call_anchor,
+        call_anchor
+        + call_anchor.replace(
+            "chat_template_override = chat_template_override",
+            "speculative_type = speculative_type",
+        ),
+        1,
+    )
+
+    target.write_text(text, encoding="utf-8", newline="\n")
+    echo("  applied speculative-type shim to unsloth_cli.commands.studio")
 
 
 def apply_cli_api_key_reuse_shim(studio_home: Path) -> None:
@@ -1001,6 +1417,35 @@ async def _autoload_openai_requested_model(
     echo("  applied OpenAI request autoload shim to backend.routes.inference")
 
 
+def apply_openai_autoload_speculative_shim(studio_home: Path) -> None:
+    target = studio_package_dir(studio_home) / "backend" / "routes" / "inference.py"
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if OPENAI_AUTOLOAD_SPECULATIVE_SHIM_MARKER in text:
+        echo("  OpenAI autoload speculative shim already present")
+        return
+
+    anchor = (
+        '        cache_type_kv = (os.environ.get("UNSLOTH_CACHE_TYPE_KV") or "").strip() or None,\n'
+        "        llama_extra_args = _openai_request_llama_extra_args(requested),\n"
+    )
+    if anchor not in text:
+        raise RuntimeError(
+            f"Could not find OpenAI autoload speculative anchor in {target}; "
+            "the Studio backend changed or the autoload shim has not been applied."
+        )
+    replacement = (
+        '        cache_type_kv = (os.environ.get("UNSLOTH_CACHE_TYPE_KV") or "").strip() or None,\n'
+        f"        # {OPENAI_AUTOLOAD_SPECULATIVE_SHIM_MARKER}: keep request autoload\n"
+        "        # aligned with win-models startup defaults.\n"
+        '        speculative_type = (os.environ.get("UNSLOTH_SPECULATIVE_TYPE") or "").strip() or None,\n'
+        "        llama_extra_args = _openai_request_llama_extra_args(requested),\n"
+    )
+    target.write_text(text.replace(anchor, replacement, 1), encoding="utf-8", newline="\n")
+    echo("  applied OpenAI autoload speculative shim to backend.routes.inference")
+
+
 def find_llama_zips(zip_dir: Path, release_tag: str, runtime: str) -> tuple[Path, Path]:
     bin_name = f"llama-{release_tag}-bin-win-cuda-{runtime}-x64.zip"
     cudart_name = f"cudart-llama-bin-win-cuda-{runtime}-x64.zip"
@@ -1055,10 +1500,1563 @@ def install_unsloth_wrapper(studio_home: Path) -> None:
     echo(f"  wrote {bin_dir}\\unsloth.cmd (ensure {bin_dir} is on PATH)")
 
 
+def _replace_once(text: str, old: str, new: str, target: Path, label: str) -> str:
+    if old not in text:
+        raise RuntimeError(f"Could not find {label} anchor in {target}; Studio changed.")
+    return text.replace(old, new, 1)
+
+
+def _write_text_if_changed(path: Path, text: str) -> bool:
+    current = path.read_text(encoding="utf-8") if path.exists() else None
+    if current == text:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", newline="\n")
+    return True
+
+
+TAILWIND_SAFE_SOURCE_START = f"/* {TAILWIND_SAFE_SOURCE_SHIM_MARKER}_START */"
+TAILWIND_SAFE_SOURCE_END = f"/* {TAILWIND_SAFE_SOURCE_SHIM_MARKER}_END */"
+TAILWIND_SOURCE_IMPORT = '@import "tailwindcss" source("./");'
+TAILWIND_STREAMDOWN_SOURCE = '@source "../node_modules/streamdown/dist/*.js";'
+TAILWIND_STRING_RE = re.compile(
+    r'"([^"\\]*(?:\\.[^"\\]*)*)"'
+    r"|'([^'\\]*(?:\\.[^'\\]*)*)'"
+    r"|`([^`\\]*(?:\\.[^`\\]*)*)`",
+    re.DOTALL,
+)
+TAILWIND_COMMON_TOKENS = {
+    "absolute",
+    "antialiased",
+    "block",
+    "border",
+    "capitalize",
+    "contents",
+    "container",
+    "flex",
+    "grid",
+    "group",
+    "hidden",
+    "inline",
+    "inline-block",
+    "inline-flex",
+    "invisible",
+    "isolate",
+    "italic",
+    "not-sr-only",
+    "peer",
+    "relative",
+    "resize",
+    "resize-none",
+    "rounded",
+    "shadow",
+    "sr-only",
+    "static",
+    "sticky",
+    "table",
+    "truncate",
+    "visible",
+}
+TAILWIND_TOKEN_PREFIXES = (
+    "*:",
+    "-bottom-",
+    "-inset-",
+    "-left-",
+    "-m-",
+    "-mb-",
+    "-ml-",
+    "-mr-",
+    "-mt-",
+    "-mx-",
+    "-my-",
+    "-right-",
+    "-rotate-",
+    "-space-",
+    "-top-",
+    "-translate-",
+    "-z-",
+    "after:",
+    "aria-",
+    "aspect-",
+    "backdrop-",
+    "basis-",
+    "before:",
+    "bg-",
+    "blur",
+    "border-",
+    "bottom-",
+    "col-",
+    "content-",
+    "cursor-",
+    "data-",
+    "decoration-",
+    "delay-",
+    "divide-",
+    "duration-",
+    "ease-",
+    "fill-",
+    "flex-",
+    "font-",
+    "from-",
+    "gap-",
+    "grid-",
+    "grow",
+    "h-",
+    "has-",
+    "hover:",
+    "inset-",
+    "items-",
+    "justify-",
+    "leading-",
+    "left-",
+    "line-",
+    "m-",
+    "max-",
+    "mb-",
+    "me-",
+    "min-",
+    "ml-",
+    "mr-",
+    "ms-",
+    "mt-",
+    "mx-",
+    "my-",
+    "object-",
+    "opacity-",
+    "origin-",
+    "outline-",
+    "overflow-",
+    "overscroll-",
+    "p-",
+    "pb-",
+    "pe-",
+    "place-",
+    "pl-",
+    "pr-",
+    "ps-",
+    "pt-",
+    "px-",
+    "py-",
+    "ring-",
+    "right-",
+    "rotate-",
+    "rounded-",
+    "scale-",
+    "shadow-",
+    "shrink",
+    "size-",
+    "space-",
+    "stroke-",
+    "text-",
+    "to-",
+    "top-",
+    "tracking-",
+    "transition",
+    "translate-",
+    "underline",
+    "via-",
+    "w-",
+    "z-",
+)
+
+
+def _balanced_tailwind_token(token: str) -> bool:
+    pairs = (("[", "]"), ("(", ")"))
+    for open_, close in pairs:
+        if token.count(open_) != token.count(close):
+            return False
+    return True
+
+
+def _looks_like_tailwind_token(token: str) -> bool:
+    if len(token) < 2 or len(token) > 260:
+        return False
+    if any(ch.isspace() for ch in token):
+        return False
+    if any(ch in token for ch in ("$", "{", "}", "`", ";", "\\", '"')):
+        return False
+    if token.startswith(("'", "(", ")", "http:", "https:", "data:", "/", "#", ".", "--", "<")):
+        return False
+    if token.startswith("@") and not token.startswith(("@container", "@sm", "@md", "@lg", "@xl", "@2xl")):
+        return False
+    if token.endswith((":", ".", "?")):
+        return False
+    if "<" in token:
+        return False
+    if "=" in token and "[" not in token:
+        return False
+    if "?" in token or ")." in token or "=>" in token:
+        return False
+    if token[0].isdigit() and not re.match(r"^\d+xl:", token):
+        return False
+    if token.endswith("[]"):
+        return False
+    if re.search(r"[A-Z]", token) and not token.startswith("["):
+        return False
+    if not _balanced_tailwind_token(token):
+        return False
+    base = token.rsplit(":", 1)[-1]
+    if token.startswith("[") or ":[" in token:
+        return True
+    if token in TAILWIND_COMMON_TOKENS:
+        return True
+    if token.startswith(TAILWIND_TOKEN_PREFIXES):
+        return True
+    return base in TAILWIND_COMMON_TOKENS or base.startswith(TAILWIND_TOKEN_PREFIXES)
+
+
+def _iter_source_string_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for match in TAILWIND_STRING_RE.finditer(text):
+        value = next(group for group in match.groups() if group is not None)
+        value = value.replace("\\n", " ").replace("\\t", " ")
+        for raw in re.split(r"\s+", value):
+            token = raw.strip().strip(",")
+            if _looks_like_tailwind_token(token):
+                tokens.add(token)
+    return tokens
+
+
+def _tailwind_inline_escape(token: str) -> str:
+    return token.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _chunk_tailwind_tokens(tokens: list[str], *, max_chars: int = 3500) -> list[list[str]]:
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
+    for token in tokens:
+        next_len = len(token) + (1 if current else 0)
+        if current and current_len + next_len > max_chars:
+            chunks.append(current)
+            current = [token]
+            current_len = len(token)
+            continue
+        current.append(token)
+        current_len += next_len
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _build_tailwind_safe_source_block(frontend: Path) -> str:
+    src = frontend / "src"
+    tokens: set[str] = set()
+    for pattern in ("*.ts", "*.tsx", "*.js", "*.jsx"):
+        for path in src.rglob(pattern):
+            tokens.update(_iter_source_string_tokens(path.read_text(encoding="utf-8", errors="ignore")))
+    # Keep the auth shell usable even if the extractor misses JSX literals that
+    # are critical for login and first-run recovery.
+    tokens.update({"h-20", "w-20", "max-w-sm", "object-contain", "mx-auto", "mb-2"})
+    ordered = sorted(tokens)
+    lines = [TAILWIND_SAFE_SOURCE_START + "\n"]
+    for chunk in _chunk_tailwind_tokens([_tailwind_inline_escape(token) for token in ordered]):
+        lines.append(f'@source inline("{" ".join(chunk)}");\n')
+    lines.append(TAILWIND_SAFE_SOURCE_END + "\n")
+    return "".join(lines)
+
+
+def _apply_tailwind_safe_source_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "index.css"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    text = text.replace('@import "tailwindcss";\n', TAILWIND_SOURCE_IMPORT + "\n")
+    text = text.replace(TAILWIND_STREAMDOWN_SOURCE + "\n", "")
+    anchor = '@plugin "@toolwind/corner-shape";\n'
+    text = _replace_once(
+        text,
+        anchor,
+        anchor + TAILWIND_STREAMDOWN_SOURCE + "\n",
+        target,
+        "Tailwind streamdown source anchor",
+    )
+    text = text.replace('@source inline("h-20 w-20 max-w-sm object-contain mx-auto mb-2");\n', "")
+    block = _build_tailwind_safe_source_block(frontend)
+    if TAILWIND_SAFE_SOURCE_START in text and TAILWIND_SAFE_SOURCE_END in text:
+        start = text.index(TAILWIND_SAFE_SOURCE_START)
+        end = text.index(TAILWIND_SAFE_SOURCE_END, start) + len(TAILWIND_SAFE_SOURCE_END)
+        if end < len(text) and text[end] == "\n":
+            end += 1
+        new_text = text[:start] + block + text[end:]
+    else:
+        anchor = '@plugin "@toolwind/corner-shape";\n'
+        new_text = _replace_once(text, anchor, anchor + block, target, "Tailwind plugin anchor")
+    if new_text == target.read_text(encoding="utf-8").replace("\r\n", "\n"):
+        return False
+    target.write_text(new_text, encoding="utf-8", newline="\n")
+    return True
+
+
+def _apply_asr_fallback_backend_schema_shim(studio_home: Path) -> bool:
+    target = studio_package_dir(studio_home) / "backend" / "models" / "inference.py"
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if "audio_transcription_fallback_available" in text:
+        return False
+    audio_field = '    has_audio_input: bool = Field(False, description = "Whether model accepts audio input (ASR)")\n'
+    fallback_field = (
+        audio_field
+        + f"    # {ASR_FALLBACK_SHIM_MARKER}: external ASR sidecar available for text-only models.\n"
+        + '    audio_transcription_fallback_available: bool = Field(False, description = "Whether audio can be transcribed through an external ASR sidecar")\n'
+    )
+    text = text.replace(audio_field, fallback_field)
+    target.write_text(text, encoding="utf-8", newline="\n")
+    return True
+
+
+def _apply_asr_fallback_backend_route_shim(studio_home: Path) -> bool:
+    target = studio_package_dir(studio_home) / "backend" / "routes" / "inference.py"
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    changed = False
+    if ASR_FALLBACK_SHIM_MARKER not in text:
+        helper = f'''
+
+def _audio_transcription_fallback_url() -> Optional[str]:
+    # {ASR_FALLBACK_SHIM_MARKER}: Parakeet or another local ASR sidecar.
+    url = (os.environ.get("UNSLOTH_ASR_FALLBACK_URL") or "").strip()
+    return url.rstrip("/") if url else None
+
+
+def _audio_transcription_fallback_available() -> bool:
+    return _audio_transcription_fallback_url() is not None
+
+
+def _gguf_native_audio_input_available(llama_backend) -> bool:
+    return bool(getattr(llama_backend, "_has_audio_input", False)) and bool(
+        getattr(llama_backend, "_mmproj_has_audio", False)
+    )
+
+
+def _prepare_audio_for_asr_wav(b64: str) -> str:
+    """Return 16kHz mono WAV base64 for external ASR sidecars."""
+    if b64.startswith("data:"):
+        b64 = b64.split(",", 1)[1] if "," in b64 else ""
+    raw = base64.b64decode(b64)
+    arr, sr = _decode_audio_mono(raw)
+    if sr != 16000:
+        arr = _resample_mono_linear(arr, sr, 16000)
+        sr = 16000
+    return base64.b64encode(_mono_f32_to_wav_bytes(arr, sr)).decode("ascii")
+
+
+async def _transcribe_audio_fallback(b64: str) -> str:
+    url = _audio_transcription_fallback_url()
+    if not url:
+        raise _reject(
+            400,
+            "Audio provided but current model does not support native audio input, and no ASR fallback is configured.",
+        )
+    try:
+        wav_b64 = await asyncio.to_thread(_prepare_audio_for_asr_wav, b64)
+    except Exception as e:
+        logger.warning("Audio decode for ASR fallback failed: %s", e, exc_info = True)
+        raise _reject(400, "Could not decode the provided audio file for transcription.")
+    try:
+        async with httpx.AsyncClient(timeout = httpx.Timeout(180.0, connect = 5.0)) as client:
+            resp = await client.post(
+                f"{{url}}/transcribe",
+                json = {{"audio_base64": wav_b64, "format": "wav"}},
+            )
+    except Exception as e:
+        logger.warning("ASR fallback request failed: %s", e, exc_info = True)
+        raise _reject(502, "Audio transcription fallback is not reachable.")
+    if resp.status_code >= 400:
+        detail = resp.text[:500]
+        logger.warning("ASR fallback returned %s: %s", resp.status_code, detail)
+        raise _reject(502, "Audio transcription fallback failed.")
+    try:
+        data = resp.json()
+    except Exception:
+        logger.warning("ASR fallback returned non-JSON response: %s", resp.text[:500])
+        raise _reject(502, "Audio transcription fallback returned an invalid response.")
+    transcript = str(data.get("text") or "").strip()
+    if not transcript:
+        raise _reject(422, "Audio transcription fallback returned an empty transcript.")
+    return transcript
+
+
+def _voice_transcript_prompt(existing: str, transcript: str) -> str:
+    bridge = "Please respond to the attached voice message."
+    existing = (existing or "").strip()
+    transcript = transcript.strip()
+    if existing and existing != bridge:
+        return (
+            f"{{existing}}\\n\\n"
+            "The user also sent a voice message. Transcript:\\n"
+            f"{{transcript}}"
+        )
+    return "The user sent a voice message. Transcript:\\n" + transcript
+
+
+def _inject_audio_transcript(messages: list[dict], transcript: str) -> None:
+    """Replace the newest user turn's bridge text with an ASR transcript."""
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            text_parts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text_parts.append(str(part.get("text") or ""))
+            msg["content"] = _voice_transcript_prompt("\\n".join(text_parts), transcript)
+        else:
+            msg["content"] = _voice_transcript_prompt(str(content or ""), transcript)
+        return
+'''
+        text = _replace_once(
+            text,
+            "\ndef _inject_audio_part(messages: list[dict], audio_b64: str, audio_format: str) -> None:\n",
+            helper + "\ndef _inject_audio_part(messages: list[dict], audio_b64: str, audio_format: str) -> None:\n",
+            target,
+            "ASR fallback helper anchor",
+        )
+        changed = True
+
+    if "_gguf_native_audio_input_available" not in text:
+        native_helper = '''
+
+def _gguf_native_audio_input_available(llama_backend) -> bool:
+    return bool(getattr(llama_backend, "_has_audio_input", False)) and bool(
+        getattr(llama_backend, "_mmproj_has_audio", False)
+    )
+
+'''
+        text = _replace_once(
+            text,
+            "\ndef _prepare_audio_for_asr_wav(b64: str) -> str:\n",
+            native_helper + "def _prepare_audio_for_asr_wav(b64: str) -> str:\n",
+            target,
+            "ASR fallback native GGUF audio helper anchor",
+        )
+        changed = True
+
+    legacy_response_upgrades = [
+        (
+            '                    has_audio_input = getattr(llama_backend, "_has_audio_input", False),\n                    audio_transcription_fallback_available = _audio_transcription_fallback_available(),\n                    inference = inference_config,\n',
+            '                    has_audio_input = _gguf_native_audio_input_available(llama_backend),\n                    audio_transcription_fallback_available = _audio_transcription_fallback_available(),\n                    inference = inference_config,\n',
+        ),
+        (
+            "                has_audio_input = llama_backend._has_audio_input,\n                audio_transcription_fallback_available = _audio_transcription_fallback_available(),\n                inference = inference_config,\n",
+            "                has_audio_input = _gguf_native_audio_input_available(llama_backend),\n                audio_transcription_fallback_available = _audio_transcription_fallback_available(),\n                inference = inference_config,\n",
+        ),
+        (
+            '                has_audio_input = getattr(llama_backend, "_has_audio_input", False),\n                audio_transcription_fallback_available = _audio_transcription_fallback_available(),\n                loading = [],\n',
+            '                has_audio_input = _gguf_native_audio_input_available(llama_backend),\n                audio_transcription_fallback_available = _audio_transcription_fallback_available(),\n                loading = [],\n',
+        ),
+    ]
+    for old, new in legacy_response_upgrades:
+        if old in text and new not in text:
+            text = text.replace(old, new, 1)
+            changed = True
+
+    response_replacements = [
+        (
+            '                    has_audio_input = getattr(llama_backend, "_has_audio_input", False),\n                    inference = inference_config,\n',
+            '                    has_audio_input = _gguf_native_audio_input_available(llama_backend),\n                    audio_transcription_fallback_available = _audio_transcription_fallback_available(),\n                    inference = inference_config,\n',
+        ),
+        (
+            '                    has_audio_input = _model_info.get("has_audio_input", False),\n                    inference = inference_config,\n',
+            '                    has_audio_input = _model_info.get("has_audio_input", False),\n                    audio_transcription_fallback_available = _audio_transcription_fallback_available(),\n                    inference = inference_config,\n',
+        ),
+        (
+            "                has_audio_input = llama_backend._has_audio_input,\n                inference = inference_config,\n",
+            "                has_audio_input = _gguf_native_audio_input_available(llama_backend),\n                audio_transcription_fallback_available = _audio_transcription_fallback_available(),\n                inference = inference_config,\n",
+        ),
+        (
+            "            has_audio_input = config.has_audio_input,\n            inference = inference_config,\n",
+            "            has_audio_input = config.has_audio_input,\n            audio_transcription_fallback_available = _audio_transcription_fallback_available(),\n            inference = inference_config,\n",
+        ),
+        (
+            '                has_audio_input = getattr(llama_backend, "_has_audio_input", False),\n                loading = [],\n',
+            '                has_audio_input = _gguf_native_audio_input_available(llama_backend),\n                audio_transcription_fallback_available = _audio_transcription_fallback_available(),\n                loading = [],\n',
+        ),
+        (
+            "            has_audio_input = has_audio_input,\n            loading = list(getattr(backend, \"loading_models\", set())),\n",
+            "            has_audio_input = has_audio_input,\n            audio_transcription_fallback_available = _audio_transcription_fallback_available(),\n            loading = list(getattr(backend, \"loading_models\", set())),\n",
+        ),
+    ]
+    for old, new in response_replacements:
+        if new in text:
+            continue
+        text = _replace_once(text, old, new, target, "ASR fallback response field")
+        changed = True
+
+    old_audio_block = """        audio_b64 = None
+        audio_format = "wav"
+        if payload.audio_base64:
+            if not getattr(llama_backend, "_has_audio_input", False):
+                raise _reject(
+                    400,
+                    "Audio provided but current GGUF model does not support audio input.",
+                )
+            if len(payload.audio_base64) > _MAX_AUDIO_B64_CHARS:
+                raise _reject(413, "Audio file is too large (max ~25 MB).")
+            try:
+                audio_b64, audio_format = await asyncio.to_thread(
+                    _prepare_audio_for_llama, payload.audio_base64
+                )
+            except Exception as e:
+                logger.warning("Audio decode failed: %s", e, exc_info = True)
+                raise _reject(400, "Could not decode the provided audio file.")
+"""
+    previous_audio_block = """        audio_b64 = None
+        audio_format = "wav"
+        audio_transcript = None
+        if payload.audio_base64:
+            if len(payload.audio_base64) > _MAX_AUDIO_B64_CHARS:
+                raise _reject(413, "Audio file is too large (max ~25 MB).")
+            if not getattr(llama_backend, "_has_audio_input", False):
+                audio_transcript = await _transcribe_audio_fallback(payload.audio_base64)
+            else:
+                try:
+                    audio_b64, audio_format = await asyncio.to_thread(
+                        _prepare_audio_for_llama, payload.audio_base64
+                    )
+                except Exception as e:
+                    logger.warning("Audio decode failed: %s", e, exc_info = True)
+                    raise _reject(400, "Could not decode the provided audio file.")
+"""
+    new_audio_block = """        audio_b64 = None
+        audio_format = "wav"
+        audio_transcript = None
+        if payload.audio_base64:
+            if len(payload.audio_base64) > _MAX_AUDIO_B64_CHARS:
+                raise _reject(413, "Audio file is too large (max ~25 MB).")
+            native_gguf_audio = _gguf_native_audio_input_available(llama_backend)
+            if not native_gguf_audio:
+                audio_transcript = await _transcribe_audio_fallback(payload.audio_base64)
+            else:
+                try:
+                    audio_b64, audio_format = await asyncio.to_thread(
+                        _prepare_audio_for_llama, payload.audio_base64
+                    )
+                except Exception as e:
+                    logger.warning("Audio decode failed: %s", e, exc_info = True)
+                    raise _reject(400, "Could not decode the provided audio file.")
+"""
+    if new_audio_block not in text:
+        if previous_audio_block in text:
+            text = text.replace(previous_audio_block, new_audio_block, 1)
+        else:
+            text = _replace_once(text, old_audio_block, new_audio_block, target, "GGUF audio fallback block")
+        changed = True
+
+    old_inject = """        image_b64 = None
+        if audio_b64:
+            _inject_audio_part(gguf_messages, audio_b64, audio_format)
+"""
+    new_inject = """        image_b64 = None
+        if audio_transcript:
+            _inject_audio_transcript(gguf_messages, audio_transcript)
+        elif audio_b64:
+            _inject_audio_part(gguf_messages, audio_b64, audio_format)
+"""
+    if new_inject not in text:
+        text = _replace_once(text, old_inject, new_inject, target, "GGUF audio transcript injection")
+        changed = True
+
+    if changed:
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return changed
+
+
+def _apply_asr_fallback_frontend_shim(frontend: Path) -> bool:
+    changed = False
+
+    runtime_types = frontend / "src" / "features" / "chat" / "types" / "runtime.ts"
+    text = runtime_types.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if "hasVoiceInput?: boolean;" not in text:
+        text = _replace_once(
+            text,
+            "  hasAudioInput?: boolean;\n",
+            "  hasAudioInput?: boolean;\n  hasVoiceInput?: boolean;\n",
+            runtime_types,
+            "runtime voice input field",
+        )
+        runtime_types.write_text(text, encoding="utf-8", newline="\n")
+        changed = True
+
+    api_types = frontend / "src" / "features" / "chat" / "types" / "api.ts"
+    text = api_types.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if "audio_transcription_fallback_available?: boolean;" not in text:
+        text = text.replace(
+            "  has_audio_input?: boolean;\n",
+            "  has_audio_input?: boolean;\n  audio_transcription_fallback_available?: boolean;\n",
+        )
+        api_types.write_text(text, encoding="utf-8", newline="\n")
+        changed = True
+
+    model_runtime = frontend / "src" / "features" / "chat" / "hooks" / "use-chat-model-runtime.ts"
+    text = model_runtime.read_text(encoding="utf-8").replace("\r\n", "\n")
+    replacements = [
+        (
+            "  has_audio_input?: boolean;\n}): string | undefined {\n",
+            "  has_audio_input?: boolean;\n  audio_transcription_fallback_available?: boolean;\n}): string | undefined {\n",
+        ),
+        (
+            "  if (model.has_audio_input) tags.push(\"Audio Input\");\n",
+            "  if (model.has_audio_input) tags.push(\"Audio Input\");\n  else if (model.audio_transcription_fallback_available) tags.push(\"Voice via ASR\");\n",
+        ),
+        (
+            "    !model.has_audio_input\n  )\n",
+            "    !model.has_audio_input &&\n    !model.audio_transcription_fallback_available\n  )\n",
+        ),
+        (
+            "  has_audio_input?: boolean;\n}): ChatModelSummary {\n",
+            "  has_audio_input?: boolean;\n  audio_transcription_fallback_available?: boolean;\n}): ChatModelSummary {\n",
+        ),
+        (
+            "    hasAudioInput: Boolean(model.has_audio_input),\n",
+            "    hasAudioInput: Boolean(model.has_audio_input),\n    hasVoiceInput: Boolean(model.has_audio_input || model.audio_transcription_fallback_available),\n",
+        ),
+        (
+            "    has_audio_input?: boolean;\n  },\n): void {\n",
+            "    has_audio_input?: boolean;\n    audio_transcription_fallback_available?: boolean;\n  },\n): void {\n",
+        ),
+        (
+            "    hasAudioInput: Boolean(resp.has_audio_input),\n",
+            "    hasAudioInput: Boolean(resp.has_audio_input),\n    hasVoiceInput: Boolean(resp.has_audio_input || resp.audio_transcription_fallback_available),\n",
+        ),
+    ]
+    for old, new in replacements:
+        if new in text:
+            continue
+        text = _replace_once(text, old, new, model_runtime, "model runtime voice input")
+        changed = True
+    if changed:
+        model_runtime.write_text(text, encoding="utf-8", newline="\n")
+
+    status_sync = frontend / "src" / "features" / "chat" / "lib" / "apply-inference-status-to-store.ts"
+    text = status_sync.read_text(encoding="utf-8").replace("\r\n", "\n")
+    old = """  const store = useChatRuntimeStore.getState();
+  if (store.models.some((model) => model.id === checkpointId)) {
+    return;
+  }
+  const summary: ChatModelSummary = {
+    id: checkpointId,
+    name: status.active_model ?? checkpointId,
+    isVision: status.is_vision ?? false,
+    isLora: false,
+    isGguf: status.is_gguf ?? false,
+    isAudio: status.is_audio ?? false,
+    audioType: status.audio_type ?? null,
+    hasAudioInput: status.has_audio_input ?? false,
+  };
+  store.setModels([...store.models, summary]);
+"""
+    new = """  const store = useChatRuntimeStore.getState();
+  const voiceFields = {
+    isVision: status.is_vision ?? false,
+    isGguf: status.is_gguf ?? false,
+    isAudio: status.is_audio ?? false,
+    audioType: status.audio_type ?? null,
+    hasAudioInput: status.has_audio_input ?? false,
+    hasVoiceInput: Boolean(
+      status.has_audio_input || status.audio_transcription_fallback_available,
+    ),
+  };
+  const idx = store.models.findIndex((model) => model.id === checkpointId);
+  if (idx !== -1) {
+    const next = [...store.models];
+    next[idx] = { ...next[idx], ...voiceFields };
+    store.setModels(next);
+    return;
+  }
+  const summary: ChatModelSummary = {
+    id: checkpointId,
+    name: status.active_model ?? checkpointId,
+    isLora: false,
+    ...voiceFields,
+  };
+  store.setModels([...store.models, summary]);
+"""
+    if new not in text:
+        text = _replace_once(text, old, new, status_sync, "status voice capability sync")
+        status_sync.write_text(text, encoding="utf-8", newline="\n")
+        changed = True
+
+    audio_adapter = frontend / "src" / "features" / "chat" / "audio-attachment-adapter.ts"
+    text = audio_adapter.read_text(encoding="utf-8").replace("\r\n", "\n")
+    replacements = [
+        (
+            "    } else if (!activeModel?.hasAudioInput) {\n",
+            "    } else if (!activeModel?.hasVoiceInput) {\n",
+        ),
+        (
+            "      unavailableReason = `${label} cannot accept audio. Load an audio-input model before attaching audio files.`;\n",
+            "      unavailableReason = `${label} cannot accept voice input. Load an audio-input model or enable the ASR fallback before attaching audio files.`;\n",
+        ),
+    ]
+    for old, new in replacements:
+        if new in text:
+            continue
+        text = _replace_once(text, old, new, audio_adapter, "audio adapter voice gate")
+        changed = True
+    if changed:
+        audio_adapter.write_text(text, encoding="utf-8", newline="\n")
+
+    thread = frontend / "src" / "components" / "assistant-ui" / "thread.tsx"
+    text = thread.read_text(encoding="utf-8").replace("\r\n", "\n")
+    replacements = [
+        (
+            "    if (!checkpoint) return \"Load an audio-input model before recording audio.\";\n",
+            "    if (!checkpoint) return \"Load a model before recording audio.\";\n",
+        ),
+        (
+            "    if (model?.hasAudioInput) return null;\n",
+            "    if (model?.hasVoiceInput) return null;\n",
+        ),
+        (
+            "    return `${label} does not expose audio input. Load a model with an audio-capable mmproj.`;\n",
+            "    return `${label} cannot accept voice input. Load an audio-input model or enable the ASR fallback.`;\n",
+        ),
+        (
+            "            tooltip={recorder.status === \"processing\" ? \"Preparing voice message...\" : audioInputUnavailableReason ?? `Record native audio (max ${recorder.secondsLimit}s)`}\n",
+            "            tooltip={recorder.status === \"processing\" ? \"Preparing voice message...\" : audioInputUnavailableReason ?? `Record voice message (max ${recorder.secondsLimit}s)`}\n",
+        ),
+        (
+            "            aria-label=\"Record native audio message\"\n",
+            "            aria-label=\"Record voice message\"\n",
+        ),
+        (
+            "            aria-label=\"Stop native audio recording\"\n",
+            "            aria-label=\"Stop voice recording\"\n",
+        ),
+    ]
+    for old, new in replacements:
+        if new in text:
+            continue
+        text = text.replace(old, new)
+        changed = True
+    thread.write_text(text, encoding="utf-8", newline="\n")
+
+    shared = frontend / "src" / "features" / "chat" / "shared-composer.tsx"
+    text = shared.read_text(encoding="utf-8").replace("\r\n", "\n")
+    replacements = [
+        (
+            "    ? \"Load an audio-input model before recording audio.\"\n",
+            "    ? \"Load a model before recording audio.\"\n",
+        ),
+        (
+            "    : activeModel?.hasAudioInput\n",
+            "    : activeModel?.hasVoiceInput\n",
+        ),
+        (
+            "      : `${activeModel?.name || \"Current model\"} does not expose audio input. Load a model with an audio-capable mmproj.`;\n",
+            "      : `${activeModel?.name || \"Current model\"} cannot accept voice input. Load an audio-input model or enable the ASR fallback.`;\n",
+        ),
+        (
+            "                tooltip={nativeRecorder.status === \"processing\" ? \"Preparing voice message...\" : nativeAudioUnavailableReason ?? `Record native audio (max ${nativeRecorder.secondsLimit}s)`}\n",
+            "                tooltip={nativeRecorder.status === \"processing\" ? \"Preparing voice message...\" : nativeAudioUnavailableReason ?? `Record voice message (max ${nativeRecorder.secondsLimit}s)`}\n",
+        ),
+        (
+            "                aria-label=\"Record native audio message\"\n",
+            "                aria-label=\"Record voice message\"\n",
+        ),
+        (
+            "                aria-label=\"Stop native audio recording\"\n",
+            "                aria-label=\"Stop voice recording\"\n",
+        ),
+        (
+            "          hasAudioInput: Boolean(resp.has_audio_input),\n",
+            "          hasAudioInput: Boolean(resp.has_audio_input),\n          hasVoiceInput: Boolean(resp.has_audio_input || resp.audio_transcription_fallback_available),\n",
+        ),
+        (
+            "              {activeModel?.hasAudioInput && (\n",
+            "              {activeModel?.hasVoiceInput && (\n",
+        ),
+    ]
+    for old, new in replacements:
+        if new in text:
+            continue
+        text = text.replace(old, new)
+        changed = True
+    shared.write_text(text, encoding="utf-8", newline="\n")
+
+    return changed
+
+
+def _apply_native_audio_backend_settings_shim(studio_home: Path) -> bool:
+    target = studio_package_dir(studio_home) / "backend" / "routes" / "chat_history.py"
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if "voiceRecordingMaxSeconds" in text:
+        return False
+    old = "    toolCallTimeout: Optional[int] = Field(default = None, ge = 1)\n"
+    new = (
+        old
+        + "    # UNSLOTH_NATIVE_AUDIO_MIC_SHIM: browser mic recorder duration cap.\n"
+        + "    voiceRecordingMaxSeconds: Optional[int] = Field(default = None, ge = 5, le = 600)\n"
+    )
+    target.write_text(_replace_once(text, old, new, target, "chat settings schema"), encoding="utf-8", newline="\n")
+    return True
+
+
+def _apply_native_audio_frontend_api_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "features" / "chat" / "api" / "chat-settings-api.ts"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if "voiceRecordingMaxSeconds?: number;" in text:
+        return False
+    old = "  toolCallTimeout?: number;\n"
+    new = old + "  voiceRecordingMaxSeconds?: number;\n"
+    target.write_text(_replace_once(text, old, new, target, "chat settings API type"), encoding="utf-8", newline="\n")
+    return True
+
+
+def _apply_native_audio_settings_storage_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "features" / "chat" / "utils" / "chat-settings-storage.ts"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    changed = False
+    if "sanitizeIntRange" not in text:
+        old = (
+            "function sanitizeInt(value: unknown, min: number): number | undefined {\n"
+            "  return typeof value === \"number\" && Number.isInteger(value) && value >= min\n"
+            "    ? value\n"
+            "    : undefined;\n"
+            "}\n"
+        )
+        new = (
+            old
+            + "\n"
+            + "function sanitizeIntRange(\n"
+            + "  value: unknown,\n"
+            + "  min: number,\n"
+            + "  max: number,\n"
+            + "): number | undefined {\n"
+            + "  return typeof value === \"number\" &&\n"
+            + "    Number.isInteger(value) &&\n"
+            + "    value >= min &&\n"
+            + "    value <= max\n"
+            + "    ? value\n"
+            + "    : undefined;\n"
+            + "}\n"
+        )
+        text = _replace_once(text, old, new, target, "sanitizeInt helper")
+        changed = True
+    if "voiceRecordingMaxSeconds" not in text:
+        text = _replace_once(
+            text,
+            "  const toolCallTimeout = sanitizeInt(value.toolCallTimeout, 1);\n",
+            (
+                "  const toolCallTimeout = sanitizeInt(value.toolCallTimeout, 1);\n"
+                "  const voiceRecordingMaxSeconds = sanitizeIntRange(\n"
+                "    value.voiceRecordingMaxSeconds,\n"
+                "    5,\n"
+                "    600,\n"
+                "  );\n"
+            ),
+            target,
+            "sanitize chat settings voice field",
+        )
+        text = _replace_once(
+            text,
+            "  if (toolCallTimeout !== undefined) settings.toolCallTimeout = toolCallTimeout;\n",
+            (
+                "  if (toolCallTimeout !== undefined) settings.toolCallTimeout = toolCallTimeout;\n"
+                "  if (voiceRecordingMaxSeconds !== undefined) {\n"
+                "    settings.voiceRecordingMaxSeconds = voiceRecordingMaxSeconds;\n"
+                "  }\n"
+            ),
+            target,
+            "persist voice setting",
+        )
+        text = _replace_once(
+            text,
+            "    settings.toolCallTimeout === undefined\n",
+            (
+                "    settings.toolCallTimeout === undefined &&\n"
+                "    settings.voiceRecordingMaxSeconds === undefined\n"
+            ),
+            target,
+            "empty settings voice field",
+        )
+        changed = True
+    if changed:
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return changed
+
+
+def _apply_native_audio_runtime_store_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "features" / "chat" / "stores" / "chat-runtime-store.ts"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    changed = False
+    if "  voiceRecordingMaxSeconds: 30,\n" in text:
+        text = text.replace(
+            "  voiceRecordingMaxSeconds: 30,\n",
+            "  voiceRecordingMaxSeconds: 120,\n",
+            1,
+        )
+        changed = True
+    replacements = [
+        (
+            "  toolCallTimeout: number;\n",
+            "  toolCallTimeout: number;\n  voiceRecordingMaxSeconds: number;\n",
+            "store field",
+        ),
+        (
+            "  setToolCallTimeout: (value: number) => void;\n",
+            "  setToolCallTimeout: (value: number) => void;\n  setVoiceRecordingMaxSeconds: (value: number) => void;\n",
+            "store setter type",
+        ),
+        (
+            '  | "toolCallTimeout";\n',
+            '  | "toolCallTimeout"\n  | "voiceRecordingMaxSeconds";\n',
+            "scalar setting key",
+        ),
+        (
+            '  "toolCallTimeout",\n',
+            '  "toolCallTimeout",\n  "voiceRecordingMaxSeconds",\n',
+            "scalar setting list",
+        ),
+        (
+            "  toolCallTimeout: 5,\n",
+            "  toolCallTimeout: 5,\n  voiceRecordingMaxSeconds: 120,\n",
+            "default voice setting",
+        ),
+        (
+            "      return { toolCallTimeout };\n    }),\n",
+            (
+                "      return { toolCallTimeout };\n"
+                "    }),\n"
+                "  setVoiceRecordingMaxSeconds: (voiceRecordingMaxSeconds) =>\n"
+                "    set((state) => {\n"
+                "      const next = Math.min(600, Math.max(5, Math.round(voiceRecordingMaxSeconds)));\n"
+                "      setScalarSettingVersion(\n"
+                "        \"voiceRecordingMaxSeconds\",\n"
+                "        next,\n"
+                "        state.voiceRecordingMaxSeconds,\n"
+                "      );\n"
+                "      return { voiceRecordingMaxSeconds: next };\n"
+                "    }),\n"
+            ),
+            "voice setter implementation",
+        ),
+    ]
+    for old, new, label in replacements:
+        if new in text:
+            continue
+        text = _replace_once(text, old, new, target, label)
+        changed = True
+    if changed:
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return changed
+
+
+def _apply_native_audio_settings_panel_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "features" / "chat" / "chat-settings-sheet.tsx"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    changed = False
+    if "VoiceRecordingLimitSlider" not in text:
+        old = "        {!isExternalModel ? (\n          <CollapsibleSection label=\"Tools\">\n"
+        new = (
+            "        {!isExternalModel ? (\n"
+            "          <CollapsibleSection label=\"Voice\">\n"
+            "            <div className=\"flex flex-col gap-5 pt-1\">\n"
+            "              <VoiceRecordingLimitSlider />\n"
+            "            </div>\n"
+            "          </CollapsibleSection>\n"
+            "        ) : null}\n\n"
+            + old
+        )
+        text = _replace_once(text, old, new, target, "voice settings section")
+        fn = """
+
+function formatVoiceLimit(seconds: number): string {
+  if (seconds < 60) return `${seconds} sec`;
+  const minutes = seconds / 60;
+  return Number.isInteger(minutes) ? `${minutes} min` : `${seconds} sec`;
+}
+
+function VoiceRecordingLimitSlider() {
+  const limit = useChatRuntimeStore((s) => s.voiceRecordingMaxSeconds);
+  const setLimit = useChatRuntimeStore((s) => s.setVoiceRecordingMaxSeconds);
+
+  return (
+    <ParamSlider
+      label="Voice Recording Limit"
+      value={limit}
+      min={5}
+      max={600}
+      step={5}
+      onChange={setLimit}
+      displayValue={formatVoiceLimit(limit)}
+      valueSize={8}
+      info="Maximum browser microphone recording length for voice messages. Defaults to 2 minutes for ASR fallback; Gemma native audio is capped at 30 seconds."
+    />
+  );
+}
+"""
+        text = _replace_once(text, "\nfunction ToolCallTimeoutSlider() {\n", fn + "\nfunction ToolCallTimeoutSlider() {\n", target, "voice slider function")
+        changed = True
+    voice_info = '      info="Maximum browser microphone recording length for voice messages. Defaults to 2 minutes for ASR fallback; Gemma native audio is capped at 30 seconds."\n'
+    for old_info in (
+        '      info="Maximum browser microphone recording length for native audio-input messages. Gemma defaults safely to 30 seconds; other models can be raised up to 10 minutes."\n',
+        '      info="Maximum browser microphone recording length for voice messages. Defaults to 2 minutes for ASR fallback; can be raised up to 10 minutes."\n',
+    ):
+        if old_info in text and voice_info not in text:
+            text = text.replace(old_info, voice_info, 1)
+            changed = True
+    if changed:
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return changed
+
+
+def _apply_native_audio_thread_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "components" / "assistant-ui" / "thread.tsx"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    changed = False
+    if 'from "@/features/chat/native-audio-recorder";' not in text:
+        text = _replace_once(
+            text,
+            'import { sentAudioNames } from "@/features/chat/api/chat-adapter";\n',
+            (
+                'import { sentAudioNames } from "@/features/chat/api/chat-adapter";\n'
+                'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n'
+            ),
+            target,
+            "native recorder import",
+        )
+        changed = True
+    elif (
+        'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n'
+        not in text
+        and 'import { useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n' in text
+    ):
+        text = text.replace(
+            'import { useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n',
+            'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "@/features/chat/native-audio-recorder";\n',
+            1,
+        )
+        changed = True
+    if "  recordingDisabled?: boolean;\n" not in text:
+        text = _replace_once(
+            text,
+            "  disabled?: boolean;\n  queueDisabled?: boolean;\n",
+            "  disabled?: boolean;\n  recordingDisabled?: boolean;\n  queueDisabled?: boolean;\n",
+            target,
+            "thread recorder disabled prop",
+        )
+        changed = True
+    if "  recordingDisabled,\n  queueDisabled,\n" not in text:
+        text = _replace_once(
+            text,
+            "  disabled,\n  queueDisabled,\n",
+            "  disabled,\n  recordingDisabled,\n  queueDisabled,\n",
+            target,
+            "thread recorder disabled destructure",
+        )
+        changed = True
+    if "const recorder = useNativeAudioRecorder" not in text:
+        old = (
+            "  const isQueueRunning = Boolean(queueEntry);\n"
+            "  return (\n"
+        )
+        new = (
+            "  const isQueueRunning = Boolean(queueEntry);\n"
+            "  const voiceRecordingMaxSeconds = useChatRuntimeStore(\n"
+            "    (s) => s.voiceRecordingMaxSeconds,\n"
+            "  );\n"
+            "  const activeVoiceModel = useChatRuntimeStore((s) => {\n"
+            "    const checkpoint = s.params.checkpoint;\n"
+            "    return checkpoint ? s.models.find((m) => m.id === checkpoint) : undefined;\n"
+            "  });\n"
+            "  const effectiveVoiceRecordingMaxSeconds = getEffectiveVoiceRecordingMaxSeconds(\n"
+            "    voiceRecordingMaxSeconds,\n"
+            "    activeVoiceModel,\n"
+            "  );\n"
+            "  const setPendingAudio = useChatRuntimeStore((s) => s.setPendingAudio);\n"
+            "  const clearPendingAudio = useChatRuntimeStore((s) => s.clearPendingAudio);\n"
+            "  const audioInputUnavailableReason = useChatRuntimeStore((s) => {\n"
+            "    if (s.modelLoading) return \"Wait for model loading to finish before recording audio.\";\n"
+            "    const checkpoint = s.params.checkpoint;\n"
+            "    if (!checkpoint) return \"Load an audio-input model before recording audio.\";\n"
+            "    const model = s.models.find((m) => m.id === checkpoint);\n"
+            "    if (model?.hasAudioInput) return null;\n"
+            "    const label = model?.name || checkpoint;\n"
+            "    return `${label} does not expose audio input. Load a model with an audio-capable mmproj.`;\n"
+            "  });\n"
+            "  const audioInputEnabled = audioInputUnavailableReason === null;\n"
+            "  const recorder = useNativeAudioRecorder((base64, name) => {\n"
+            "    clearPendingAudio();\n"
+            "    setPendingAudio(base64, name);\n"
+            "  }, effectiveVoiceRecordingMaxSeconds);\n"
+            "  const recorderBusy = recorder.status === \"recording\" || recorder.status === \"processing\";\n"
+            "  return (\n"
+        )
+        text = _replace_once(text, old, new, target, "thread recorder state")
+        changed = True
+    legacy_audio_gate = (
+        "  const audioRecordingEnabled = useChatRuntimeStore((s) => {\n"
+        "    const checkpoint = s.params.checkpoint;\n"
+        "    if (!checkpoint || s.modelLoading) return false;\n"
+        "    return Boolean(s.models.find((m) => m.id === checkpoint)?.hasAudioInput);\n"
+        "  });\n"
+    )
+    if legacy_audio_gate in text:
+        text = text.replace(legacy_audio_gate, "", 1)
+        changed = True
+    if (
+        "const activeVoiceModel = useChatRuntimeStore" not in text
+        and "const voiceRecordingMaxSeconds = useChatRuntimeStore" in text
+    ):
+        text = _replace_once(
+            text,
+            "  const voiceRecordingMaxSeconds = useChatRuntimeStore(\n"
+            "    (s) => s.voiceRecordingMaxSeconds,\n"
+            "  );\n",
+            (
+                "  const voiceRecordingMaxSeconds = useChatRuntimeStore(\n"
+                "    (s) => s.voiceRecordingMaxSeconds,\n"
+                "  );\n"
+                "  const activeVoiceModel = useChatRuntimeStore((s) => {\n"
+                "    const checkpoint = s.params.checkpoint;\n"
+                "    return checkpoint ? s.models.find((m) => m.id === checkpoint) : undefined;\n"
+                "  });\n"
+                "  const effectiveVoiceRecordingMaxSeconds = getEffectiveVoiceRecordingMaxSeconds(\n"
+                "    voiceRecordingMaxSeconds,\n"
+                "    activeVoiceModel,\n"
+                "  );\n"
+            ),
+            target,
+            "thread effective voice recording limit",
+        )
+        changed = True
+    if "}, voiceRecordingMaxSeconds);" in text and "effectiveVoiceRecordingMaxSeconds" in text:
+        text = text.replace("}, voiceRecordingMaxSeconds);", "}, effectiveVoiceRecordingMaxSeconds);", 1)
+        changed = True
+    if "  const audioInputUnavailableReason = useChatRuntimeStore((s) => {\n" not in text:
+        text = _replace_once(
+            text,
+            "  const clearPendingAudio = useChatRuntimeStore((s) => s.clearPendingAudio);\n"
+            "  const recorder = useNativeAudioRecorder((base64, name) => {\n",
+            (
+                "  const clearPendingAudio = useChatRuntimeStore((s) => s.clearPendingAudio);\n"
+                "  const audioInputUnavailableReason = useChatRuntimeStore((s) => {\n"
+                "    if (s.modelLoading) return \"Wait for model loading to finish before recording audio.\";\n"
+                "    const checkpoint = s.params.checkpoint;\n"
+                "    if (!checkpoint) return \"Load an audio-input model before recording audio.\";\n"
+                "    const model = s.models.find((m) => m.id === checkpoint);\n"
+                "    if (model?.hasAudioInput) return null;\n"
+                "    const label = model?.name || checkpoint;\n"
+                "    return `${label} does not expose audio input. Load a model with an audio-capable mmproj.`;\n"
+                "  });\n"
+                "  const audioInputEnabled = audioInputUnavailableReason === null;\n"
+                "  const recorder = useNativeAudioRecorder((base64, name) => {\n"
+            ),
+            target,
+            "thread audio support state",
+        )
+        changed = True
+    old_dictation = (
+        "      <ComposerPrimitive.If dictation={false}>\n"
+        "        <ComposerPrimitive.Dictate asChild={true}>\n"
+        "          <TooltipIconButton\n"
+        "            tooltip=\"Dictate\"\n"
+        "            aria-label=\"Dictate\"\n"
+        "            variant=\"ghost\"\n"
+        "            className=\"size-8 rounded-full text-foreground\"\n"
+        "          >\n"
+        "            <MicIcon className=\"size-5\" />\n"
+        "          </TooltipIconButton>\n"
+        "        </ComposerPrimitive.Dictate>\n"
+        "      </ComposerPrimitive.If>\n"
+        "      <ComposerPrimitive.If dictation={true}>\n"
+        "        <ComposerPrimitive.StopDictation asChild={true}>\n"
+        "          <TooltipIconButton\n"
+        "            tooltip=\"Stop dictation\"\n"
+        "            aria-label=\"Stop dictation\"\n"
+        "            variant=\"ghost\"\n"
+        "            className=\"size-8 rounded-full text-destructive\"\n"
+        "          >\n"
+        "            <SquareIcon className=\"size-3 animate-pulse fill-current\" />\n"
+        "          </TooltipIconButton>\n"
+        "        </ComposerPrimitive.StopDictation>\n"
+        "      </ComposerPrimitive.If>\n"
+    )
+    new_recorder = (
+        "      {recorder.supported ? (\n"
+        "        recorder.status === \"recording\" ? (\n"
+        "          <TooltipIconButton\n"
+        "            tooltip={`Stop recording (${recorder.secondsElapsed}/${recorder.secondsLimit}s)`}\n"
+        "            aria-label=\"Stop native audio recording\"\n"
+        "            variant=\"ghost\"\n"
+        "            className=\"size-8 rounded-full text-destructive\"\n"
+        "            onClick={recorder.stop}\n"
+        "          >\n"
+        "            <SquareIcon className=\"size-3 animate-pulse fill-current\" />\n"
+        "          </TooltipIconButton>\n"
+        "        ) : (\n"
+        "          <TooltipIconButton\n"
+        "            tooltip={recorder.status === \"processing\" ? \"Preparing voice message...\" : audioInputUnavailableReason ?? `Record native audio (max ${recorder.secondsLimit}s)`}\n"
+        "            aria-label=\"Record native audio message\"\n"
+        "            variant=\"ghost\"\n"
+        "            className=\"size-8 rounded-full text-foreground\"\n"
+        "            disabled={recordingDisabled || !audioInputEnabled || recorderBusy}\n"
+        "            onClick={() => void recorder.start()}\n"
+        "          >\n"
+        "            {recorder.status === \"processing\" ? <Spinner className=\"size-4\" /> : <MicIcon className=\"size-5\" />}\n"
+        "          </TooltipIconButton>\n"
+        "        )\n"
+        "      ) : null}\n"
+    )
+    if old_dictation in text:
+        text = text.replace(old_dictation, new_recorder, 1)
+        changed = True
+    if "      {audioRecordingEnabled && recorder.supported ? (\n" in text:
+        text = text.replace(
+            "      {audioRecordingEnabled && recorder.supported ? (\n",
+            "      {recorder.supported ? (\n",
+            1,
+        )
+        changed = True
+    if "            disabled={disabled || recorderBusy}\n" in text:
+        text = text.replace(
+            "            disabled={disabled || recorderBusy}\n",
+            "            disabled={recordingDisabled || recorderBusy}\n",
+            1,
+        )
+        changed = True
+    if '            tooltip={recorder.status === "processing" ? "Preparing voice message..." : `Record native audio (max ${recorder.secondsLimit}s)`}\n' in text:
+        text = text.replace(
+            '            tooltip={recorder.status === "processing" ? "Preparing voice message..." : `Record native audio (max ${recorder.secondsLimit}s)`}\n',
+            '            tooltip={recorder.status === "processing" ? "Preparing voice message..." : audioInputUnavailableReason ?? `Record native audio (max ${recorder.secondsLimit}s)`}\n',
+            1,
+        )
+        changed = True
+    if "            disabled={recordingDisabled || recorderBusy}\n" in text:
+        text = text.replace(
+            "            disabled={recordingDisabled || recorderBusy}\n",
+            "            disabled={recordingDisabled || !audioInputEnabled || recorderBusy}\n",
+            1,
+        )
+        changed = True
+    if "          recordingDisabled={disabled || isComposing || hasPendingAttachments}\n" in text:
+        text = text.replace(
+            "          recordingDisabled={disabled || isComposing || hasPendingAttachments}\n",
+            "          recordingDisabled={isComposing || hasPendingAttachments}\n",
+            1,
+        )
+        changed = True
+    if "          recordingDisabled={isComposing || hasPendingAttachments}\n" not in text:
+        text = _replace_once(
+            text,
+            "          queueDisabled={!canQueueCurrentPrompt}\n",
+            (
+                "          recordingDisabled={isComposing || hasPendingAttachments}\n"
+                "          queueDisabled={!canQueueCurrentPrompt}\n"
+            ),
+            target,
+            "thread recorder disabled call prop",
+        )
+        changed = True
+    if "  const ensureAudioOnlyComposerText = useCallback(() => {\n" not in text:
+        text = _replace_once(
+            text,
+            (
+                "  const canQueueCurrentPrompt =\n"
+                "    composerText.trim().length > 0 &&\n"
+                "    !hasAttachments &&\n"
+                "    !hasPendingAudio &&\n"
+                "    !isComposing &&\n"
+                "    !hasPendingAttachments &&\n"
+                "    !disabled &&\n"
+                "    !overlay;\n"
+            ),
+            (
+                "  const canQueueCurrentPrompt =\n"
+                "    composerText.trim().length > 0 &&\n"
+                "    !hasAttachments &&\n"
+                "    !hasPendingAudio &&\n"
+                "    !isComposing &&\n"
+                "    !hasPendingAttachments &&\n"
+                "    !disabled &&\n"
+                "    !overlay;\n"
+                "  const ensureAudioOnlyComposerText = useCallback(() => {\n"
+                "    if (!hasPendingAudio || composerText.trim().length > 0 || hasAttachments) {\n"
+                "      return;\n"
+                "    }\n"
+                "    flushResourcesSync(() => {\n"
+                "      aui.composer().setText(\"Please respond to the attached voice message.\");\n"
+                "    });\n"
+                "  }, [aui, composerText, hasAttachments, hasPendingAudio]);\n"
+            ),
+            target,
+            "thread audio-only composer text helper",
+        )
+        changed = True
+    if "      ensureAudioOnlyComposerText();\n      if (indexingActive && !overlay) {\n" not in text:
+        text = _replace_once(
+            text,
+            "      if (indexingActive && !overlay) {\n",
+            "      ensureAudioOnlyComposerText();\n      if (indexingActive && !overlay) {\n",
+            target,
+            "thread audio-only send text injection",
+        )
+        changed = True
+    if "[disabled, shouldBlockSend, indexingActive, overlay, enqueueSend]," in text:
+        text = text.replace(
+            "[disabled, shouldBlockSend, indexingActive, overlay, enqueueSend],",
+            "[disabled, shouldBlockSend, ensureAudioOnlyComposerText, indexingActive, overlay, enqueueSend],",
+            1,
+        )
+        changed = True
+    if changed:
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return changed
+
+
+def _apply_native_audio_shared_composer_shim(frontend: Path) -> bool:
+    target = frontend / "src" / "features" / "chat" / "shared-composer.tsx"
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    changed = False
+    if 'from "./native-audio-recorder";' not in text:
+        text = _replace_once(
+            text,
+            'import { McpComposerButton } from "./mcp-composer-button";\n',
+            (
+                'import { McpComposerButton } from "./mcp-composer-button";\n'
+                'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n'
+            ),
+            target,
+            "shared recorder import",
+        )
+        changed = True
+    elif (
+        'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n'
+        not in text
+        and 'import { useNativeAudioRecorder } from "./native-audio-recorder";\n' in text
+    ):
+        text = text.replace(
+            'import { useNativeAudioRecorder } from "./native-audio-recorder";\n',
+            'import { getEffectiveVoiceRecordingMaxSeconds, useNativeAudioRecorder } from "./native-audio-recorder";\n',
+            1,
+        )
+        changed = True
+    if 'import { Spinner } from "@/components/ui/spinner";' not in text:
+        text = _replace_once(
+            text,
+            'import { Button } from "@/components/ui/button";\n',
+            (
+                'import { Button } from "@/components/ui/button";\n'
+                'import { Spinner } from "@/components/ui/spinner";\n'
+            ),
+            target,
+            "shared spinner import",
+        )
+        changed = True
+    if "const voiceRecordingMaxSeconds = useChatRuntimeStore" not in text:
+        old = (
+            "  const clearPendingAudioStore = useChatRuntimeStore(\n"
+            "    (s) => s.clearPendingAudio,\n"
+            "  );\n"
+        )
+        new = (
+            old
+            + "  const voiceRecordingMaxSeconds = useChatRuntimeStore(\n"
+            + "    (s) => s.voiceRecordingMaxSeconds,\n"
+            + "  );\n"
+            + "  const effectiveVoiceRecordingMaxSeconds = getEffectiveVoiceRecordingMaxSeconds(\n"
+            + "    voiceRecordingMaxSeconds,\n"
+            + "    activeModel,\n"
+            + "  );\n"
+            + "  const nativeRecorder = useNativeAudioRecorder((base64, name) => {\n"
+            + "    setPendingAudio({ name, base64 });\n"
+            + "    setPendingAudioStore(base64, name);\n"
+            + "  }, effectiveVoiceRecordingMaxSeconds);\n"
+            + "  const nativeRecorderBusy =\n"
+            + "    nativeRecorder.status === \"recording\" || nativeRecorder.status === \"processing\";\n"
+            + "  const nativeAudioUnavailableReason = !modelLoaded\n"
+            + "    ? \"Load an audio-input model before recording audio.\"\n"
+            + "    : activeModel?.hasAudioInput\n"
+            + "      ? null\n"
+            + "      : `${activeModel?.name || \"Current model\"} does not expose audio input. Load a model with an audio-capable mmproj.`;\n"
+            + "  const nativeRecordingEnabled =\n"
+            + "    nativeRecorder.supported && nativeAudioUnavailableReason === null;\n"
+        )
+        text = _replace_once(text, old, new, target, "shared recorder state")
+        changed = True
+    if "  const nativeRecordingEnabled = Boolean(activeModel?.hasAudioInput);\n" in text:
+        text = text.replace(
+            "  const nativeRecordingEnabled = Boolean(activeModel?.hasAudioInput);\n",
+            "",
+            1,
+        )
+        changed = True
+    if (
+        "const effectiveVoiceRecordingMaxSeconds = getEffectiveVoiceRecordingMaxSeconds" not in text
+        and "const voiceRecordingMaxSeconds = useChatRuntimeStore" in text
+    ):
+        text = _replace_once(
+            text,
+            "  const voiceRecordingMaxSeconds = useChatRuntimeStore(\n"
+            "    (s) => s.voiceRecordingMaxSeconds,\n"
+            "  );\n",
+            (
+                "  const voiceRecordingMaxSeconds = useChatRuntimeStore(\n"
+                "    (s) => s.voiceRecordingMaxSeconds,\n"
+                "  );\n"
+                "  const effectiveVoiceRecordingMaxSeconds = getEffectiveVoiceRecordingMaxSeconds(\n"
+                "    voiceRecordingMaxSeconds,\n"
+                "    activeModel,\n"
+                "  );\n"
+            ),
+            target,
+            "shared effective voice recording limit",
+        )
+        changed = True
+    if "}, voiceRecordingMaxSeconds);" in text and "effectiveVoiceRecordingMaxSeconds" in text:
+        text = text.replace("}, voiceRecordingMaxSeconds);", "}, effectiveVoiceRecordingMaxSeconds);", 1)
+        changed = True
+    if "  const nativeAudioUnavailableReason = !modelLoaded\n" not in text:
+        text = _replace_once(
+            text,
+            "  const nativeRecorderBusy =\n"
+            "    nativeRecorder.status === \"recording\" || nativeRecorder.status === \"processing\";\n",
+            (
+                "  const nativeRecorderBusy =\n"
+                "    nativeRecorder.status === \"recording\" || nativeRecorder.status === \"processing\";\n"
+                "  const nativeAudioUnavailableReason = !modelLoaded\n"
+                "    ? \"Load an audio-input model before recording audio.\"\n"
+                "    : activeModel?.hasAudioInput\n"
+                "      ? null\n"
+                "      : `${activeModel?.name || \"Current model\"} does not expose audio input. Load a model with an audio-capable mmproj.`;\n"
+                "  const nativeRecordingEnabled =\n"
+                "    nativeRecorder.supported && nativeAudioUnavailableReason === null;\n"
+            ),
+            target,
+            "shared audio support state",
+        )
+        changed = True
+    old_dictation = (
+        "          {dictationSupported && (\n"
+        "            <>\n"
+        "              {!isDictating ? (\n"
+        "                <TooltipIconButton\n"
+        "                  tooltip=\"Dictate\"\n"
+        "                  side=\"bottom\"\n"
+        "                  variant=\"ghost\"\n"
+        "                  size=\"icon\"\n"
+        "                  className=\"size-8 rounded-full text-muted-foreground\"\n"
+        "                  onClick={startDictation}\n"
+        "                  aria-label=\"Dictate\"\n"
+        "                >\n"
+        "                  <MicIcon className=\"size-4\" />\n"
+        "                </TooltipIconButton>\n"
+        "              ) : (\n"
+        "                <TooltipIconButton\n"
+        "                  tooltip=\"Stop dictation\"\n"
+        "                  side=\"bottom\"\n"
+        "                  variant=\"ghost\"\n"
+        "                  size=\"icon\"\n"
+        "                  className=\"size-8 rounded-full text-destructive\"\n"
+        "                  onClick={stopDictation}\n"
+        "                  aria-label=\"Stop dictation\"\n"
+        "                >\n"
+        "                  <SquareIcon className=\"size-3 animate-pulse fill-current\" />\n"
+        "                </TooltipIconButton>\n"
+        "              )}\n"
+        "            </>\n"
+        "          )}\n"
+    )
+    new_recorder = (
+        "          {nativeRecorder.supported ? (\n"
+        "            nativeRecorder.status === \"recording\" ? (\n"
+        "              <TooltipIconButton\n"
+        "                tooltip={`Stop recording (${nativeRecorder.secondsElapsed}/${nativeRecorder.secondsLimit}s)`}\n"
+        "                side=\"bottom\"\n"
+        "                variant=\"ghost\"\n"
+        "                size=\"icon\"\n"
+        "                className=\"size-8 rounded-full text-destructive\"\n"
+        "                onClick={nativeRecorder.stop}\n"
+        "                aria-label=\"Stop native audio recording\"\n"
+        "              >\n"
+        "                <SquareIcon className=\"size-3 animate-pulse fill-current\" />\n"
+        "              </TooltipIconButton>\n"
+        "            ) : (\n"
+        "              <TooltipIconButton\n"
+        "                tooltip={nativeRecorder.status === \"processing\" ? \"Preparing voice message...\" : nativeAudioUnavailableReason ?? `Record native audio (max ${nativeRecorder.secondsLimit}s)`}\n"
+        "                side=\"bottom\"\n"
+        "                variant=\"ghost\"\n"
+        "                size=\"icon\"\n"
+        "                className=\"size-8 rounded-full text-muted-foreground\"\n"
+        "                disabled={!nativeRecordingEnabled || nativeRecorderBusy}\n"
+        "                onClick={() => void nativeRecorder.start()}\n"
+        "                aria-label=\"Record native audio message\"\n"
+        "              >\n"
+        "                {nativeRecorder.status === \"processing\" ? <Spinner className=\"size-4\" /> : <MicIcon className=\"size-4\" />}\n"
+        "              </TooltipIconButton>\n"
+        "            )\n"
+        "          ) : null}\n"
+    )
+    if old_dictation in text:
+        text = text.replace(old_dictation, new_recorder, 1)
+        changed = True
+    if "          {nativeRecordingEnabled && nativeRecorder.supported ? (\n" in text:
+        text = text.replace(
+            "          {nativeRecordingEnabled && nativeRecorder.supported ? (\n",
+            "          {nativeRecorder.supported ? (\n",
+            1,
+        )
+        changed = True
+    if '                tooltip={nativeRecorder.status === "processing" ? "Preparing voice message..." : `Record native audio (max ${nativeRecorder.secondsLimit}s)`}\n' in text:
+        text = text.replace(
+            '                tooltip={nativeRecorder.status === "processing" ? "Preparing voice message..." : `Record native audio (max ${nativeRecorder.secondsLimit}s)`}\n',
+            '                tooltip={nativeRecorder.status === "processing" ? "Preparing voice message..." : nativeAudioUnavailableReason ?? `Record native audio (max ${nativeRecorder.secondsLimit}s)`}\n',
+            1,
+        )
+        changed = True
+    if "                disabled={nativeRecorderBusy}\n" in text:
+        text = text.replace(
+            "                disabled={nativeRecorderBusy}\n",
+            "                disabled={!nativeRecordingEnabled || nativeRecorderBusy}\n",
+            1,
+        )
+        changed = True
+    if changed:
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return changed
+
+
+def apply_native_audio_mic_shim(studio_home: Path, *, build_frontend: bool = False) -> None:
+    frontend = studio_package_dir(studio_home) / "frontend"
+    if not frontend.exists():
+        raise FileNotFoundError(f"Missing frontend at {frontend}")
+    changed = False
+    recorder_path = frontend / "src" / "features" / "chat" / "native-audio-recorder.ts"
+    changed |= _write_text_if_changed(recorder_path, NATIVE_AUDIO_RECORDER_TS)
+    changed |= _apply_asr_fallback_backend_schema_shim(studio_home)
+    changed |= _apply_asr_fallback_backend_route_shim(studio_home)
+    changed |= _apply_native_audio_backend_settings_shim(studio_home)
+    changed |= _apply_native_audio_frontend_api_shim(frontend)
+    changed |= _apply_native_audio_settings_storage_shim(frontend)
+    changed |= _apply_native_audio_runtime_store_shim(frontend)
+    changed |= _apply_native_audio_settings_panel_shim(frontend)
+    changed |= _apply_native_audio_thread_shim(frontend)
+    changed |= _apply_native_audio_shared_composer_shim(frontend)
+    changed |= _apply_asr_fallback_frontend_shim(frontend)
+    changed |= _apply_tailwind_safe_source_shim(frontend)
+
+    if changed:
+        echo("  applied native audio mic shim to Studio web UI")
+    else:
+        echo("  native audio mic shim already present")
+    if build_frontend:
+        echo("  rebuilding Studio frontend...")
+        completed = subprocess.run(["npm.cmd", "run", "build"], cwd=frontend)
+        if completed.returncode != 0:
+            raise SystemExit(completed.returncode)
+
+
 def _resolve_secret_ref(secret: dict[str, Any]) -> str:
     env_name = secret.get("env")
     if env_name:
         value = os.environ.get(str(env_name))
+        if not value and str(env_name) == "MCPPROXY_AGENTS_TOKEN":
+            value = os.environ.get("MCPPROXY_AGENT_TOKEN")
         if value:
             return value
 
@@ -1246,6 +3244,7 @@ def setup(args: argparse.Namespace) -> None:
     apply_openai_reasoning_passthrough_shim(studio_home)
     apply_openai_request_autoload_shim_v2(studio_home)
     apply_embedding_extra_args_shim(studio_home)
+    apply_native_audio_mic_shim(studio_home, build_frontend=False)
 
     echo(f"\n[2/6] Locating prebuilt zips in {zip_dir} ...")
     bin_zip, cudart_zip = find_llama_zips(zip_dir, args.release_tag, args.runtime)
@@ -1293,6 +3292,7 @@ def setup(args: argparse.Namespace) -> None:
     apply_openai_reasoning_passthrough_shim(studio_home)
     apply_openai_request_autoload_shim_v2(studio_home)
     apply_embedding_extra_args_shim(studio_home)
+    apply_native_audio_mic_shim(studio_home, build_frontend=True)
 
     if args.register_model_root:
         echo(f"\n[5/6] Registering model folder {model_root} as a Studio scan folder...")
@@ -1312,10 +3312,13 @@ def serve(args: argparse.Namespace) -> None:
     studio_home = Path(args.studio_home)
     unsloth = resolve_unsloth_exe(studio_home)
     apply_chat_template_override_shim(studio_home)
+    apply_speculative_type_shim(studio_home)
     apply_cli_api_key_reuse_shim(studio_home)
     apply_openai_reasoning_passthrough_shim(studio_home)
     apply_openai_request_autoload_shim_v2(studio_home)
+    apply_openai_autoload_speculative_shim(studio_home)
     apply_embedding_extra_args_shim(studio_home)
+    apply_native_audio_mic_shim(studio_home, build_frontend=args.patch_web)
     if args.parallel < 1:
         raise ValueError("--parallel must be at least 1")
     bind_host = "0.0.0.0" if args.lan else args.host
@@ -1346,6 +3349,8 @@ def serve(args: argparse.Namespace) -> None:
         env["UNSLOTH_CACHE_TYPE_KV"] = args.cache_type_kv
     if args.reasoning_format:
         env["UNSLOTH_REASONING_FORMAT"] = args.reasoning_format
+    if args.speculative_type:
+        env["UNSLOTH_SPECULATIVE_TYPE"] = args.speculative_type
     if args.chat_template_file:
         chat_template_file = Path(args.chat_template_file).resolve()
         if not chat_template_file.is_file():
@@ -1406,6 +3411,8 @@ def serve(args: argparse.Namespace) -> None:
         echo(f"llama-server KV cache override: --cache-type-k {args.cache_type_kv} --cache-type-v {args.cache_type_kv}")
     if args.reasoning_format:
         echo(f"llama-server reasoning parser: --reasoning-format {args.reasoning_format}")
+    if args.speculative_type:
+        echo(f"Studio speculative decoding mode: {args.speculative_type}")
     if embed_args:
         echo(f"llama-server embedding mode: {' '.join(embed_args)}")
     if args.chat_template_file:
@@ -1463,6 +3470,12 @@ def register(args: argparse.Namespace) -> None:
     echo(f"Registered {args.path}. Refresh the Models page in the web UI to see it.")
 
 
+def patch_web(args: argparse.Namespace) -> None:
+    studio_home = Path(args.studio_home)
+    resolve_studio_python(studio_home)
+    apply_native_audio_mic_shim(studio_home, build_frontend=not args.no_build)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="win-models unsloth")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1492,6 +3505,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--parallel", type=int, default=1)
     p.add_argument("--cache-type-kv", default="q8_0")
     p.add_argument("--reasoning-format", choices=("none", "deepseek", "deepseek-legacy"), default="deepseek")
+    p.add_argument("--speculative-type", choices=("auto", "off", "mtp", "mtp+ngram", "ngram"), default="")
     p.add_argument("--chat-template-file", default="")
     p.add_argument("--port", type=int, default=DEFAULT_STUDIO_PORT)
     p.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
@@ -1499,6 +3513,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--open", action="store_true")
     p.add_argument("--enable-tools", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--verbose-llama", action="store_true")
+    p.add_argument("--patch-web", action=argparse.BooleanOptionalAction, default=False)
     p.set_defaults(func=serve)
 
     p = sub.add_parser("stop")
@@ -1510,10 +3525,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path")
     p.add_argument("--studio-home", default=str(DEFAULT_STUDIO_HOME))
     p.set_defaults(func=register)
+
+    p = sub.add_parser("patch-web")
+    p.add_argument("--studio-home", default=str(DEFAULT_STUDIO_HOME))
+    p.add_argument("--no-build", action="store_true")
+    p.set_defaults(func=patch_web)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
+    load_dotenv_secret()
     parser = build_parser()
     args = parser.parse_args(argv)
     args.func(args)
