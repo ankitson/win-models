@@ -63,6 +63,13 @@ Declarative Unsloth MCP sync:
 just unsloth sync-mcp
 ```
 
+Patch/rebuild Unsloth Studio web integrations, including browser microphone
+input for native-audio models and ASR-backed voice input for text-only models:
+
+```powershell
+just unsloth patch-web
+```
+
 See [UNSLOTH.md](UNSLOTH.md) for Studio details, [COMFYUI.md](COMFYUI.md) for
 ComfyUI details, and [BENCHMARKS.md](BENCHMARKS.md) for local benchmark notes.
 
@@ -93,6 +100,9 @@ Model groups:
 
 Defaults can be overridden with environment variables:
 
+- Repo-local `.env.secret` is loaded by `just serve`, `just stop`, and the
+  `win-models unsloth ...` wrapper. It is ignored by git and uses simple
+  `NAME=value` lines.
 - `WIN_MODELS_MODEL_ROOT`, default `E:\root\projects\models`
 - `UNSLOTH_STUDIO_HOME`, default `E:\root\projects\unsloth`
 - `COMFYUI_HOME`, default `E:\root\projects\comfyui`
@@ -110,6 +120,8 @@ Defaults can be overridden with environment variables:
 - `WIN_MODELS_HF_TOKEN_FILE`, default `logs\hf-token.tmp`; temporary local token file used by `download-cache` when `HF_TOKEN` is unset.
 - `WIN_MODELS_HF_TOKEN_OP_REF`, default `op://clankers/huggingface-read/password`; used by `download-cache` when `HF_TOKEN` is unset.
 - `MCPPROXY_AGENTS_TOKEN`, optional override for the 1Password MCP bearer token.
+- `CLOUDFLARE_API_TOKEN`, optional override for the Caddy DNS challenge used by
+  root `just serve`; if unset, `scripts\start-edge.ps1` falls back to 1Password.
 - `WIN_MODELS_HOST`, default `0.0.0.0`
 - `WIN_MODELS_LLAMA_PORT`, default `8080`
 - `WIN_MODELS_LITERT_PORT`, default `9379`

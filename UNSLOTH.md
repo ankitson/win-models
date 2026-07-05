@@ -30,6 +30,7 @@ repeatable after that venv exists.
 ```powershell
 just unsloth setup            # patch installer, install llama.cpp, register models, write wrapper
 just unsloth sync-mcp         # sync declarative MCP servers into Studio
+just unsloth patch-web        # patch and rebuild Studio web UI integrations
 just unsloth serve            # foreground server on 127.0.0.1:8888, opens browser
 just unsloth serve-lan        # bind 0.0.0.0 for LAN access
 just unsloth serve-debug      # LOG_LEVEL=DEBUG, foreground output
@@ -59,6 +60,19 @@ The launcher patches Studio's CLI to reuse a single default `cli` API key from
 `E:\root\projects\unsloth\auth\cli-api-key.txt`. Set
 `UNSLOTH_REUSE_CLI_API_KEY=0` to restore Studio's upstream behavior of creating
 a fresh `cli` key on every `unsloth studio run`.
+
+`setup` and `patch-web` also add a microphone recorder to Studio's web UI. For
+models with native audio input, the mic button records browser audio, attaches it
+to the current chat as an audio message, and sends it through Studio's existing
+`input_audio` path. For text-only models, Studio can use `UNSLOTH_ASR_FALLBACK_URL`
+to transcribe the recording with a local ASR sidecar and inject the transcript
+into the user turn. The chat settings sidebar includes a `Voice Recording Limit`
+slider. It defaults to `120` seconds for ASR fallback, clamps to `5`-`600`
+seconds, caps Gemma native-audio models at `30` seconds, plays a warning beep 5
+seconds before the limit, and auto-stops at the configured limit. Run
+`just unsloth patch-web` after a Studio update to reapply the integration and
+rebuild the frontend bundle; use `just unsloth patch-web --no-build` only when
+you intentionally want to patch source without rebuilding.
 
 `E:\root\projects\models` is used as the Hugging Face cache root. It should not
 also be registered as a custom scan folder, because Studio lists HF cache repos
@@ -124,7 +138,9 @@ manifest registers:
 Both use `op://clankers/mcpproxy-agents/password` as a bearer token. The secret
 reference is stored in the manifest; the resolved token is written only to
 Studio's local MCP server table. If needed, `MCPPROXY_AGENTS_TOKEN` overrides the
-1Password lookup.
+1Password lookup. Repo-local `.env.secret` is loaded automatically by the
+`win-models unsloth ...` wrapper; `MCPPROXY_AGENT_TOKEN` is accepted as a
+singular alias.
 
 In Studio chat, enable the MCP composer control for local tool-capable models.
 For API calls, pass `mcp_enabled: true` with tool-enabled requests.
@@ -223,6 +239,7 @@ Conversation content is stored in `studio.db` (`chat_messages` table).
 - Open `http://localhost:8888` or `http://127.0.0.1:8888` on this machine for
   browser secure-context features such as mic input.
 - Plain `http://<LAN-IP>` disables browser-gated mic features.
-- The mic feature is browser speech-to-text; it does not send audio to the model.
+- The mic button appears when the selected Studio model advertises native audio
+  input or when an ASR fallback URL is configured.
 - Studio runs its own `llama-server` internally. Do not run it alongside the
   direct llama.cpp server against the same GPU unless you mean to.
