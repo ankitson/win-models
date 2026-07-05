@@ -33,6 +33,11 @@
 		reverse_proxy 127.0.0.1:8080
 	}
 
+	@lmstudio host lmstudio.win.ankitson.com
+	handle @lmstudio {
+		reverse_proxy 127.0.0.1:1234
+	}
+
 	@litert host litert.win.ankitson.com
 	handle @litert {
 		reverse_proxy 127.0.0.1:9379

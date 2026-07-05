@@ -1,12 +1,13 @@
 # Win Models
 
 Small Windows setup for running local model servers through direct
-`llama.cpp`/LiteRT commands, Unsloth Studio, or ComfyUI.
+`llama.cpp`/LiteRT commands, Unsloth Studio, LM Studio, or ComfyUI.
 
 ## Layout
 
 - `src/plain-llama`: direct local model servers and downloads, backed by Python.
 - `src/unsloth`: Unsloth Studio setup, model registration, serve, and cleanup.
+- `src/lmstudio`: LM Studio model-link sync, local server control, and cleanup.
 - `src/comfyui`: ComfyUI setup, update, serve, and cleanup.
 - `src/utils`: Windows-specific utilities such as firewall and VRAM monitoring.
 - `src/win_models`: the Python package used by the just recipes.
@@ -40,6 +41,14 @@ just comfy setup
 just comfy serve
 just comfy serve-tailscale
 just comfy logs
+```
+
+LM Studio:
+
+```powershell
+just lmstudio setup   # link HF-cache GGUFs into LM Studio's model layout
+just lmstudio serve   # start/confirm LM Studio's OpenAI-compatible server
+just lmstudio status
 ```
 
 Download the new Gemma 26B variants into the Hugging Face cache layout used by
@@ -78,6 +87,7 @@ ComfyUI details, and [BENCHMARKS.md](BENCHMARKS.md) for local benchmark notes.
 - llama.cpp server: `http://localhost:8080/v1`
 - LiteRT-LM server: `http://localhost:9379/v1`
 - Unsloth Studio server: `http://localhost:8888/v1`
+- LM Studio server: `http://localhost:1234/v1`
 - ComfyUI server: `http://localhost:8188`
 
 ## Variants
@@ -116,6 +126,22 @@ Defaults can be overridden with environment variables:
 - `UNSLOTH_CHAT_TEMPLATE_FILE`, default `src\unsloth\chat-templates\gemma-4-31b-it-pr118.jinja`; passed as Studio `chat_template_override`.
 - `UNSLOTH_HF_CACHE`, default `WIN_MODELS_MODEL_ROOT`; controls where Studio/HF downloads are cached.
 - `UNSLOTH_REUSE_CLI_API_KEY`, default `1`; reuses `UNSLOTH_STUDIO_HOME\auth\cli-api-key.txt` instead of creating a new `cli` API key on each Studio startup.
+- `UNSLOTH_SOURCE_REPO`, optional path to a local Unsloth checkout. When set,
+  `win-models unsloth serve` prepends it to `PYTHONPATH` and skips the
+  win-models Studio shim patch stack so the fork supplies the changes.
+- `UNSLOTH_SOURCE_BUILD_FRONTEND`, default `0`; set to `1` to build and serve
+  `UNSLOTH_SOURCE_REPO\studio\frontend\dist` before starting Studio.
+- `WIN_MODELS_LMSTUDIO_ENABLED`, default `1`; root `just serve` syncs LM
+  Studio model links and starts the LM Studio server when `lms` is available.
+- `LMSTUDIO_MODEL_ROOT`, default `%USERPROFILE%\.lmstudio\models`; GGUF files
+  from the Hugging Face cache are linked into LM Studio's
+  `publisher\model\file.gguf` layout here.
+- `LMSTUDIO_HOST`, default `127.0.0.1`
+- `LMSTUDIO_PORT`, default `1234`
+- `LMSTUDIO_DEFAULT_MODEL`, optional `lms load` model key to preload during
+  root `just serve` or `just lmstudio serve`.
+- `LMSTUDIO_CONTEXT_LENGTH`, default `UNSLOTH_CONTEXT_LENGTH` or `131072`
+- `LMSTUDIO_GPU`, default `max`; passed to `lms load --gpu` when preloading.
 - `WIN_MODELS_HF_DOWNLOAD_PYTHON`, default `3.13`; Python runtime used for Hugging Face cache downloads.
 - `WIN_MODELS_HF_TOKEN_FILE`, default `logs\hf-token.tmp`; temporary local token file used by `download-cache` when `HF_TOKEN` is unset.
 - `WIN_MODELS_HF_TOKEN_OP_REF`, default `op://clankers/huggingface-read/password`; used by `download-cache` when `HF_TOKEN` is unset.
@@ -123,7 +149,7 @@ Defaults can be overridden with environment variables:
 - `CLOUDFLARE_API_TOKEN`, optional override for the Caddy DNS challenge used by
   root `just serve`; if unset, `scripts\start-edge.ps1` falls back to 1Password.
 - `WIN_MODELS_HOST`, default `0.0.0.0`
-- `WIN_MODELS_LLAMA_PORT`, default `8080`
+- `WIN_MODELS_LLAMA_PORT` / `UNSLOTH_LLAMA_PORT`, default `8080`; fixed port for the embedded Unsloth llama-server worker and Caddy's `llama.win.ankitson.com` route.
 - `WIN_MODELS_LITERT_PORT`, default `9379`
 - `WIN_MODELS_STUDIO_PORT`, default `8888`
 - `COMFYUI_HOST`, default `127.0.0.1`

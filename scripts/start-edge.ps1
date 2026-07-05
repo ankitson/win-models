@@ -20,6 +20,16 @@ $ReasoningFormat = if ($env:UNSLOTH_REASONING_FORMAT) { $env:UNSLOTH_REASONING_F
 $SpeculativeType = if ($env:UNSLOTH_SPECULATIVE_TYPE) { $env:UNSLOTH_SPECULATIVE_TYPE } else { "off" }
 $ChatTemplateFile = if ($env:UNSLOTH_CHAT_TEMPLATE_FILE) { $env:UNSLOTH_CHAT_TEMPLATE_FILE } else { Join-Path $RepoRoot "src\unsloth\chat-templates\gemma-4-31b-it-pr118.jinja" }
 $StudioPort = if ($env:WIN_MODELS_STUDIO_PORT) { $env:WIN_MODELS_STUDIO_PORT } else { "8888" }
+$LlamaPort = if ($env:UNSLOTH_LLAMA_PORT) { $env:UNSLOTH_LLAMA_PORT } elseif ($env:WIN_MODELS_LLAMA_PORT) { $env:WIN_MODELS_LLAMA_PORT } else { "8080" }
+$UnslothSourceRepo = if ($env:UNSLOTH_SOURCE_REPO) { $env:UNSLOTH_SOURCE_REPO } else { "" }
+$UnslothSourceBuildFrontend = if ($env:UNSLOTH_SOURCE_BUILD_FRONTEND) { $env:UNSLOTH_SOURCE_BUILD_FRONTEND } else { "0" }
+$LmstudioEnabled = if ($env:WIN_MODELS_LMSTUDIO_ENABLED) { $env:WIN_MODELS_LMSTUDIO_ENABLED } else { "1" }
+$LmstudioHost = if ($env:LMSTUDIO_HOST) { $env:LMSTUDIO_HOST } else { "127.0.0.1" }
+$LmstudioPort = if ($env:LMSTUDIO_PORT) { $env:LMSTUDIO_PORT } else { "1234" }
+$LmstudioModelRoot = if ($env:LMSTUDIO_MODEL_ROOT) { $env:LMSTUDIO_MODEL_ROOT } else { Join-Path $env:USERPROFILE ".lmstudio\models" }
+$LmstudioContextLength = if ($env:LMSTUDIO_CONTEXT_LENGTH) { $env:LMSTUDIO_CONTEXT_LENGTH } elseif ($env:UNSLOTH_CONTEXT_LENGTH) { $env:UNSLOTH_CONTEXT_LENGTH } else { "131072" }
+$LmstudioGpu = if ($env:LMSTUDIO_GPU) { $env:LMSTUDIO_GPU } else { "max" }
+$LmstudioDefaultModel = if ($env:LMSTUDIO_DEFAULT_MODEL) { $env:LMSTUDIO_DEFAULT_MODEL } else { "" }
 $AsrEnabled = if ($env:WIN_MODELS_ASR_ENABLED) { $env:WIN_MODELS_ASR_ENABLED } else { "1" }
 $AsrHome = if ($env:WIN_MODELS_PARAKEET_HOME) { $env:WIN_MODELS_PARAKEET_HOME } else { "E:\root\projects\parakeet-asr" }
 $AsrHost = if ($env:WIN_MODELS_ASR_HOST) { $env:WIN_MODELS_ASR_HOST } else { "127.0.0.1" }
@@ -31,16 +41,18 @@ $CaddyErrLog = Join-Path $LogDir "caddy.err.log"
 $CaddyAccessLog = Join-Path $LogDir "caddy.access.log"
 $UnslothOutLog = Join-Path $LogDir "edge-unsloth.out.log"
 $UnslothErrLog = Join-Path $LogDir "edge-unsloth.err.log"
+$LmstudioOutLog = Join-Path $LogDir "lmstudio.out.log"
+$LmstudioErrLog = Join-Path $LogDir "lmstudio.err.log"
 $AsrOutLog = Join-Path $LogDir "parakeet-asr.out.log"
 $AsrErrLog = Join-Path $LogDir "parakeet-asr.err.log"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-foreach ($path in @($CaddyOutLog, $CaddyErrLog, $CaddyAccessLog, $UnslothOutLog, $UnslothErrLog, $AsrOutLog, $AsrErrLog)) {
+foreach ($path in @($CaddyOutLog, $CaddyErrLog, $CaddyAccessLog, $UnslothOutLog, $UnslothErrLog, $LmstudioOutLog, $LmstudioErrLog, $AsrOutLog, $AsrErrLog)) {
     if (-not (Test-Path $path)) {
         New-Item -ItemType File -Path $path | Out-Null
     }
 }
-foreach ($path in @($CaddyOutLog, $CaddyErrLog, $UnslothOutLog, $UnslothErrLog, $AsrOutLog, $AsrErrLog)) {
+foreach ($path in @($CaddyOutLog, $CaddyErrLog, $UnslothOutLog, $UnslothErrLog, $LmstudioOutLog, $LmstudioErrLog, $AsrOutLog, $AsrErrLog)) {
     Clear-Content -Path $path -ErrorAction SilentlyContinue
 }
 
@@ -95,6 +107,35 @@ if (Get-NetTCPConnection -State Listen -LocalPort 443 -ErrorAction SilentlyConti
 & $Uv.Source --project $RepoRoot run win-models unsloth sync-mcp --studio-home $StudioHome
 & $Just.Source comfy serve
 
+$lmstudioProcess = $null
+if ($LmstudioEnabled -ne "0") {
+    $lmSetupArgs = @(
+        "--project", $RepoRoot,
+        "run", "win-models", "lmstudio", "setup",
+        "--hf-cache", $HfCache,
+        "--lmstudio-model-root", $LmstudioModelRoot
+    )
+    $lmSetup = Start-Process -FilePath $Uv.Source -ArgumentList $lmSetupArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $LmstudioOutLog -RedirectStandardError $LmstudioErrLog -PassThru -Wait
+    if ($lmSetup.ExitCode -ne 0) {
+        Write-Output ("LM Studio model sync exited with code {0}; see {1} and {2}." -f $lmSetup.ExitCode, $LmstudioOutLog, $LmstudioErrLog)
+    }
+
+    $lmServeArgs = @(
+        "--project", $RepoRoot,
+        "run", "win-models", "lmstudio", "serve",
+        "--host", $LmstudioHost,
+        "--port", $LmstudioPort,
+        "--context-length", $LmstudioContextLength,
+        "--gpu", $LmstudioGpu
+    )
+    if ($LmstudioDefaultModel) {
+        $lmServeArgs += @("--model", $LmstudioDefaultModel)
+    }
+    $lmstudioProcess = Start-Process -FilePath $Uv.Source -ArgumentList $lmServeArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $LmstudioOutLog -RedirectStandardError $LmstudioErrLog -PassThru
+} else {
+    Write-Output "LM Studio integration disabled by WIN_MODELS_LMSTUDIO_ENABLED=0."
+}
+
 $asrProcess = $null
 if ($AsrEnabled -ne "0") {
     $asrPython = Join-Path $AsrHome ".venv\Scripts\python.exe"
@@ -140,10 +181,17 @@ $unslothArgs = @(
     "--cache-type-kv", $CacheTypeKv,
     "--reasoning-format", $ReasoningFormat,
     "--speculative-type", $SpeculativeType,
-    "--port", $StudioPort
+    "--port", $StudioPort,
+    "--llama-port", $LlamaPort
 )
 if ($ChatTemplateFile) {
     $unslothArgs += @("--chat-template-file", $ChatTemplateFile)
+}
+if ($UnslothSourceRepo) {
+    $unslothArgs += @("--source-repo", $UnslothSourceRepo)
+    if ($UnslothSourceBuildFrontend -in @("1", "true", "yes", "on")) {
+        $unslothArgs += @("--source-build-frontend")
+    }
 }
 
 $unslothProcess = Start-Process -FilePath $Uv.Source -ArgumentList $unslothArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $UnslothOutLog -RedirectStandardError $UnslothErrLog -PassThru
@@ -153,5 +201,9 @@ Write-Output ("Started ComfyUI via `just comfy serve`.")
 if ($asrProcess) {
     Write-Output ("Started Parakeet ASR background PID {0}. Logs: {1}, {2}" -f $asrProcess.Id, $AsrOutLog, $AsrErrLog)
 }
+if ($lmstudioProcess) {
+    Write-Output ("Started/confirmed LM Studio background helper PID {0}. API: http://{1}:{2}/v1. Logs: {3}, {4}" -f $lmstudioProcess.Id, $LmstudioHost, $LmstudioPort, $LmstudioOutLog, $LmstudioErrLog)
+}
 Write-Output ("Started Unsloth background PID {0}. Logs: {1}, {2}" -f $unslothProcess.Id, $UnslothOutLog, $UnslothErrLog)
+Write-Output ("Embedded llama-server target: http://127.0.0.1:{0}/v1 via https://llama.win.ankitson.com/v1 after the model loads." -f $LlamaPort)
 Write-Output ("Started Caddy background PID {0}. Logs: {1}, {2}, access {3}" -f $caddyProcess.Id, $CaddyOutLog, $CaddyErrLog, $CaddyAccessLog)

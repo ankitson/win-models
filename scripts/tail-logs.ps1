@@ -11,11 +11,13 @@ $ErrorActionPreference = "Stop"
 $OutputEncoding = [Console]::OutputEncoding
 
 $fileNames = @(
-    "caddy.access.log",
+    # "caddy.access.log", too noisy
     "caddy.err.log",
     "caddy.out.log",
     "edge-unsloth.err.log",
     "edge-unsloth.out.log",
+    "lmstudio.err.log",
+    "lmstudio.out.log",
     "parakeet-asr.err.log",
     "parakeet-asr.out.log",
     "comfyui.err.log",
@@ -60,9 +62,9 @@ for ($i = 0; $i -lt $fileNames.Count; $i++) {
     }
 
     $states[$path] = [pscustomobject]@{
-        Label = $label
-        Color = $color
-        Offset = (Get-Item $path).Length
+        Label     = $label
+        Color     = $color
+        Offset    = (Get-Item $path).Length
         Remainder = ""
     }
 }
@@ -92,11 +94,13 @@ while ($true) {
             $reader = [System.IO.StreamReader]::new($stream, [System.Text.UTF8Encoding]::UTF8, $true, 4096, $true)
             try {
                 $chunk = $reader.ReadToEnd()
-            } finally {
+            }
+            finally {
                 $reader.Dispose()
             }
             $state.Offset = $stream.Position
-        } finally {
+        }
+        finally {
             $stream.Dispose()
         }
 
@@ -111,7 +115,8 @@ while ($true) {
         if ($endsWithNewline) {
             $state.Remainder = ""
             $linesToWrite = if ($parts.Length -gt 1) { $parts[0..($parts.Length - 2)] } else { @() }
-        } else {
+        }
+        else {
             $state.Remainder = $parts[-1]
             $linesToWrite = if ($parts.Length -gt 1) { $parts[0..($parts.Length - 2)] } else { @() }
         }
