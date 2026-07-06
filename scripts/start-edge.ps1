@@ -22,6 +22,7 @@ $Parallel = if ($env:UNSLOTH_PARALLEL) { $env:UNSLOTH_PARALLEL } else { "1" }
 $CacheTypeKv = if ($env:UNSLOTH_CACHE_TYPE_KV) { $env:UNSLOTH_CACHE_TYPE_KV } else { "q8_0" }
 $ReasoningFormat = if ($env:UNSLOTH_REASONING_FORMAT) { $env:UNSLOTH_REASONING_FORMAT } else { "deepseek" }
 $SpeculativeType = if ($env:UNSLOTH_SPECULATIVE_TYPE) { $env:UNSLOTH_SPECULATIVE_TYPE } else { "off" }
+$LlamaExtraArgs = if ($env:UNSLOTH_LLAMA_EXTRA_ARGS) { $env:UNSLOTH_LLAMA_EXTRA_ARGS } else { "--no-mmap --batch-size 256 --ubatch-size 512" }
 $ChatTemplateFile = if ($env:UNSLOTH_CHAT_TEMPLATE_FILE) { $env:UNSLOTH_CHAT_TEMPLATE_FILE } else { Join-Path $RepoRoot "src\unsloth\chat-templates\gemma-4-31b-it-pr118.jinja" }
 $PromptLog = if ($env:UNSLOTH_PROMPT_LOG) { $env:UNSLOTH_PROMPT_LOG } else { "1" }
 $PromptLogFile = if ($env:UNSLOTH_PROMPT_LOG_FILE) { $env:UNSLOTH_PROMPT_LOG_FILE } else { Join-Path $LogDir "unsloth-prompts.jsonl" }
@@ -29,14 +30,14 @@ $StudioPort = if ($env:WIN_MODELS_STUDIO_PORT) { $env:WIN_MODELS_STUDIO_PORT } e
 $LlamaPort = if ($env:UNSLOTH_LLAMA_PORT) { $env:UNSLOTH_LLAMA_PORT } elseif ($env:WIN_MODELS_LLAMA_PORT) { $env:WIN_MODELS_LLAMA_PORT } else { "8080" }
 $UnslothSourceRepo = if ($env:UNSLOTH_SOURCE_REPO) { $env:UNSLOTH_SOURCE_REPO } else { "" }
 $UnslothSourceBuildFrontend = if ($env:UNSLOTH_SOURCE_BUILD_FRONTEND) { $env:UNSLOTH_SOURCE_BUILD_FRONTEND } else { "0" }
-$LmstudioEnabled = if ($env:WIN_MODELS_LMSTUDIO_ENABLED) { $env:WIN_MODELS_LMSTUDIO_ENABLED } else { "1" }
+$LmstudioEnabled = if ($env:WIN_MODELS_LMSTUDIO_ENABLED) { $env:WIN_MODELS_LMSTUDIO_ENABLED } else { "0" }
 $LmstudioHost = if ($env:LMSTUDIO_HOST) { $env:LMSTUDIO_HOST } else { "127.0.0.1" }
 $LmstudioPort = if ($env:LMSTUDIO_PORT) { $env:LMSTUDIO_PORT } else { "1234" }
 $LmstudioModelRoot = if ($env:LMSTUDIO_MODEL_ROOT) { $env:LMSTUDIO_MODEL_ROOT } else { Join-Path $env:USERPROFILE ".lmstudio\models" }
 $LmstudioContextLength = if ($env:LMSTUDIO_CONTEXT_LENGTH) { $env:LMSTUDIO_CONTEXT_LENGTH } elseif ($env:UNSLOTH_CONTEXT_LENGTH) { $env:UNSLOTH_CONTEXT_LENGTH } else { "131072" }
 $LmstudioGpu = if ($env:LMSTUDIO_GPU) { $env:LMSTUDIO_GPU } else { "max" }
 $LmstudioDefaultModel = if ($env:LMSTUDIO_DEFAULT_MODEL) { $env:LMSTUDIO_DEFAULT_MODEL } else { "" }
-$AsrEnabled = if ($env:WIN_MODELS_ASR_ENABLED) { $env:WIN_MODELS_ASR_ENABLED } else { "1" }
+$AsrEnabled = if ($env:WIN_MODELS_ASR_ENABLED) { $env:WIN_MODELS_ASR_ENABLED } else { "0" }
 $AsrHome = if ($env:WIN_MODELS_PARAKEET_HOME) { $env:WIN_MODELS_PARAKEET_HOME } else { "E:\root\projects\parakeet-asr" }
 $AsrHost = if ($env:WIN_MODELS_ASR_HOST) { $env:WIN_MODELS_ASR_HOST } else { "127.0.0.1" }
 $AsrPort = if ($env:WIN_MODELS_ASR_PORT) { $env:WIN_MODELS_ASR_PORT } else { "8891" }
@@ -122,17 +123,19 @@ if (Get-NetTCPConnection -State Listen -LocalPort 443 -ErrorAction SilentlyConti
 }
 
 Invoke-WinModels unsloth sync-mcp --studio-home $StudioHome
-$comfyArgs = @(
-    "-m", "win_models.cli",
-    "comfy", "serve",
-    "--comfy-home", $ComfyHome,
-    "--model-root", $ComfyModelRoot,
-    "--host", "127.0.0.1",
-    "--port", $ComfyPort,
-    "--log-dir", $LogDir,
-    "--memory-mode", $ComfyMemory
-)
-$comfyProcess = Start-Process -FilePath $WinModelsPython -ArgumentList $comfyArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -PassThru
+# ComfyUI disabled -- uncomment to re-enable
+# $comfyArgs = @(
+#     "-m", "win_models.cli",
+#     "comfy", "serve",
+#     "--comfy-home", $ComfyHome,
+#     "--model-root", $ComfyModelRoot,
+#     "--host", "127.0.0.1",
+#     "--port", $ComfyPort,
+#     "--log-dir", $LogDir,
+#     "--memory-mode", $ComfyMemory
+# )
+# $comfyProcess = Start-Process -FilePath $WinModelsPython -ArgumentList $comfyArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -PassThru
+$comfyProcess = $null
 
 $lmstudioProcess = $null
 if ($LmstudioEnabled -ne "0") {
@@ -220,6 +223,9 @@ if ($UnslothSourceRepo) {
         $unslothArgs += @("--source-build-frontend")
     }
 }
+if ($LlamaExtraArgs) {
+    $unslothArgs += @("--") + ($LlamaExtraArgs -split '\s+')
+}
 
 $unslothProcess = Start-Process -FilePath $WinModelsPython -ArgumentList $unslothArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $UnslothOutLog -RedirectStandardError $UnslothErrLog -PassThru
 $caddyProcess = Start-Process -FilePath $Caddy.Source -ArgumentList @("run", "--config", $CaddyConfig) -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $CaddyOutLog -RedirectStandardError $CaddyErrLog -PassThru
@@ -230,7 +236,7 @@ if ($null -eq $priorPythonPath) {
     $env:PYTHONPATH = $priorPythonPath
 }
 
-Write-Output ("Started ComfyUI background PID {0}. Logs: {1}, {2}" -f $comfyProcess.Id, (Join-Path $LogDir "comfyui.out.log"), (Join-Path $LogDir "comfyui.err.log"))
+# ComfyUI disabled -- Write-Output ("Started ComfyUI background PID {0}. Logs: {1}, {2}" -f $comfyProcess.Id, (Join-Path $LogDir "comfyui.out.log"), (Join-Path $LogDir "comfyui.err.log"))
 if ($asrProcess) {
     Write-Output ("Started Parakeet ASR background PID {0}. Logs: {1}, {2}" -f $asrProcess.Id, $AsrOutLog, $AsrErrLog)
 }

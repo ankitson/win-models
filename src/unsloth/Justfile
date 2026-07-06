@@ -9,6 +9,7 @@ default_model := env_var_or_default("UNSLOTH_DEFAULT_MODEL", "unsloth/gemma-4-26
 context_length := env_var_or_default("UNSLOTH_CONTEXT_LENGTH", "131072")
 parallel := env_var_or_default("UNSLOTH_PARALLEL", "1")
 cache_type_kv := env_var_or_default("UNSLOTH_CACHE_TYPE_KV", "q8_0")
+llama_extra_args := env_var_or_default("UNSLOTH_LLAMA_EXTRA_ARGS", "--no-mmap --batch-size 256 --ubatch-size 512")
 reasoning_format := env_var_or_default("UNSLOTH_REASONING_FORMAT", "deepseek")
 speculative_type := env_var_or_default("UNSLOTH_SPECULATIVE_TYPE", "off")
 chat_template_file := env_var_or_default("UNSLOTH_CHAT_TEMPLATE_FILE", root / "src/unsloth/chat-templates/gemma-4-31b-it-pr118.jinja")
@@ -29,15 +30,15 @@ patch-web *args:
 
 serve port=studio_port *args:
     @uv --project "{{ root }}" run win-models unsloth sync-mcp --studio-home "{{ studio_home }}"
-    @uv --project "{{ root }}" run win-models unsloth serve --studio-home "{{ studio_home }}" --hf-cache-dir "{{ hf_cache }}" --model "{{ default_model }}" --max-seq-length {{ context_length }} --parallel {{ parallel }} --cache-type-kv "{{ cache_type_kv }}" --reasoning-format "{{ reasoning_format }}" --speculative-type "{{ speculative_type }}" {{ if chat_template_file == "" { "" } else { "--chat-template-file " + quote(chat_template_file) } }} --port {{ port }} --open {{args}}
+    @uv --project "{{ root }}" run win-models unsloth serve --studio-home "{{ studio_home }}" --hf-cache-dir "{{ hf_cache }}" --model "{{ default_model }}" --max-seq-length {{ context_length }} --parallel {{ parallel }} --cache-type-kv "{{ cache_type_kv }}" --reasoning-format "{{ reasoning_format }}" --speculative-type "{{ speculative_type }}" {{ if chat_template_file == "" { "" } else { "--chat-template-file " + quote(chat_template_file) } }} --port {{ port }} --open -- {{ llama_extra_args }} {{args}}
 
 serve-lan port=studio_port *args:
     @uv --project "{{ root }}" run win-models unsloth sync-mcp --studio-home "{{ studio_home }}"
-    @uv --project "{{ root }}" run win-models unsloth serve --studio-home "{{ studio_home }}" --hf-cache-dir "{{ hf_cache }}" --model "{{ default_model }}" --max-seq-length {{ context_length }} --parallel {{ parallel }} --cache-type-kv "{{ cache_type_kv }}" --reasoning-format "{{ reasoning_format }}" --speculative-type "{{ speculative_type }}" {{ if chat_template_file == "" { "" } else { "--chat-template-file " + quote(chat_template_file) } }} --port {{ port }} --lan {{args}}
+    @uv --project "{{ root }}" run win-models unsloth serve --studio-home "{{ studio_home }}" --hf-cache-dir "{{ hf_cache }}" --model "{{ default_model }}" --max-seq-length {{ context_length }} --parallel {{ parallel }} --cache-type-kv "{{ cache_type_kv }}" --reasoning-format "{{ reasoning_format }}" --speculative-type "{{ speculative_type }}" {{ if chat_template_file == "" { "" } else { "--chat-template-file " + quote(chat_template_file) } }} --port {{ port }} --lan -- {{ llama_extra_args }} {{args}}
 
 serve-debug port=studio_port *args:
     @uv --project "{{ root }}" run win-models unsloth sync-mcp --studio-home "{{ studio_home }}"
-    @uv --project "{{ root }}" run win-models unsloth serve --studio-home "{{ studio_home }}" --hf-cache-dir "{{ hf_cache }}" --model "{{ default_model }}" --max-seq-length {{ context_length }} --parallel {{ parallel }} --cache-type-kv "{{ cache_type_kv }}" --reasoning-format "{{ reasoning_format }}" --speculative-type "{{ speculative_type }}" {{ if chat_template_file == "" { "" } else { "--chat-template-file " + quote(chat_template_file) } }} --port {{ port }} --log-level DEBUG --open --lan {{args}}
+    @uv --project "{{ root }}" run win-models unsloth serve --studio-home "{{ studio_home }}" --hf-cache-dir "{{ hf_cache }}" --model "{{ default_model }}" --max-seq-length {{ context_length }} --parallel {{ parallel }} --cache-type-kv "{{ cache_type_kv }}" --reasoning-format "{{ reasoning_format }}" --speculative-type "{{ speculative_type }}" {{ if chat_template_file == "" { "" } else { "--chat-template-file " + quote(chat_template_file) } }} --port {{ port }} --log-level DEBUG --open --lan -- {{ llama_extra_args }} {{args}}
 
 stop port=studio_port:
     @uv --project "{{ root }}" run win-models unsloth stop --studio-home "{{ studio_home }}" --port {{ port }}

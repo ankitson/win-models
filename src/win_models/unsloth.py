@@ -5803,6 +5803,12 @@ def serve(args: argparse.Namespace) -> None:
         command.append("--disable-tools")
     if args.verbose_llama:
         command.append("--verbose")
+    if args.llama_args:
+        # Strip leading -- separator if present
+        extra = list(args.llama_args)
+        if extra and extra[0] == "--":
+            extra = extra[1:]
+        command.extend(extra)
 
     echo(f"Starting Unsloth Studio on http://{bind_host}:{args.port}  (LOG_LEVEL={args.log_level})")
     echo(f"Context length={args.max_seq_length}; parallel slots={args.parallel}; per-slot context={args.max_seq_length // args.parallel}")
@@ -5814,6 +5820,8 @@ def serve(args: argparse.Namespace) -> None:
         echo(f"llama-server KV cache override: --cache-type-k {args.cache_type_kv} --cache-type-v {args.cache_type_kv}")
     if args.reasoning_format:
         echo(f"llama-server reasoning parser: --reasoning-format {args.reasoning_format}")
+    if args.llama_args:
+        echo(f"llama-server extra args: {' '.join(args.llama_args)}")
     if args.speculative_type:
         echo(f"Studio speculative decoding mode: {args.speculative_type}")
     if embed_args:
@@ -5915,7 +5923,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--studio-home", default=str(DEFAULT_STUDIO_HOME))
     p.add_argument("--model-root", default=str(DEFAULT_MODEL_ROOT))
     p.add_argument("--zip-dir", default=str(Path.home() / "Downloads"))
-    p.add_argument("--release-tag", default="b9821")
+    p.add_argument("--release-tag", default="b9878")
     p.add_argument("--runtime", default="13.3")
     p.add_argument("--skip-base", action="store_true")
     p.add_argument("--register-model-root", action="store_true")
@@ -5961,6 +5969,7 @@ def build_parser() -> argparse.ArgumentParser:
     tools_policy.add_argument("--no-enable-tools", dest="enable_tools", action="store_false", help=argparse.SUPPRESS)
     p.add_argument("--verbose-llama", action="store_true")
     p.add_argument("--patch-web", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("llama_args", nargs=argparse.REMAINDER, help="Extra args passed directly to llama-server (after --)")
     p.set_defaults(func=serve)
 
     p = sub.add_parser("stop")
