@@ -13,6 +13,7 @@ import argparse
 import os
 import subprocess
 import time
+from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -136,6 +137,7 @@ def start(args: argparse.Namespace) -> None:
     os.environ.setdefault("WIN_MODELS_LLAMA_LOG", "1")
     os.environ.setdefault("WIN_MODELS_LLAMA_LOG_FILE", str(log_dir / "llama-io.jsonl"))
     os.environ.setdefault("UNSLOTH_LLAMA_LOG_DIR", str(log_dir / "llama-server"))
+    os.environ.setdefault("UNSLOTH_LLAMA_PROMPTS_DIR", str(log_dir / "llama-prompts" / date.today().isoformat()))
 
     # ── Stop anything already running ─────────────────────────────────
     stop(
@@ -188,12 +190,10 @@ def start(args: argparse.Namespace) -> None:
             if speculative_type and speculative_type.lower() != "off":
                 unsloth_cmd += ["--speculative-type", speculative_type]
             # Pass extra llama-server args after -- (matches start-edge.ps1 line 273-275).
-            # Always include --log-timestamps so llama-server output is timestamped,
-            # and --log-prompts-dir to keep prompt logs inside the repo's log dir.
-            llama_extra = [
-                "--log-timestamps",
-                "--log-prompts-dir", str(log_dir / "llama-prompts"),
-            ]
+            # Always include --log-timestamps so llama-server output is timestamped.
+            # (--log-prompts-dir is handled by the source checkout; controlled
+            # via UNSLOTH_LLAMA_PROMPTS_DIR env var below.)
+            llama_extra = ["--log-timestamps"]
             # Per-model config takes priority; env var is the fallback.
             user_extra = cfg.llama_extra_args if cfg and cfg.llama_extra_args else os.environ.get("UNSLOTH_LLAMA_EXTRA_ARGS", "")
             if user_extra:

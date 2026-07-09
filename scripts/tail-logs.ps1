@@ -1,7 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$LogDir,
-    [string]$UnslothHome = $(if ($env:UNSLOTH_STUDIO_HOME) { $env:UNSLOTH_STUDIO_HOME } else { "E:\root\projects\unsloth" }),
     [int]$Lines = 120,
     [int]$PollMs = 350
 )
@@ -16,13 +15,16 @@ $fileNames = @(
     "caddy.err.log",
     "caddy.out.log",
     "edge-unsloth.err.log",
-    "edge-unsloth.out.log",
+    #"edge-unsloth.out.log", too noisy
+    "llama-io.jsonl",
     "lmstudio.err.log",
     "lmstudio.out.log",
     "parakeet-asr.err.log",
     "parakeet-asr.out.log",
     "comfyui.err.log",
-    "comfyui.out.log"
+    "comfyui.out.log",
+    "opencode.err.log",
+    "opencode.out.log"
 )
 
 $palette = @(
@@ -51,7 +53,7 @@ $states = @{}
 $dynamicLogs = @(
     [pscustomobject]@{
         Name      = "llama-server"
-        Directory = Join-Path $UnslothHome "logs\llama-server"
+        Directory = Join-Path $LogDir "llama-server"
         Filter    = "llama-*-port-*.log"
         Color     = "White"
         Path      = $null
@@ -97,8 +99,8 @@ function Sync-DynamicLogs {
         }
 
         $latest = Get-ChildItem -Path $spec.Directory -Filter $spec.Filter -File -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
         if (-not $latest) {
             continue
         }
@@ -121,7 +123,7 @@ for ($i = 0; $i -lt $fileNames.Count; $i++) {
 
 Sync-DynamicLogs
 Write-Host ("Tailing logs from {0}" -f $LogDir) -ForegroundColor White
-Write-Host ("Tailing latest llama-server log from {0}" -f (Join-Path $UnslothHome "logs\llama-server")) -ForegroundColor White
+Write-Host ("Tailing latest llama-server log from {0}" -f (Join-Path $LogDir "llama-server")) -ForegroundColor White
 
 while ($true) {
     Sync-DynamicLogs
