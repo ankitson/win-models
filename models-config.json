@@ -14,7 +14,8 @@
       "chat_template_file": null,
       "gpu_layers": "all",
       "flash_attn": true,
-      "parallel": 1
+      "parallel": 1,
+      "llama_extra_args": "--no-mmap --batch-size 256 --ubatch-size 512 --reasoning-preserve"
     },
     "qwen35b-a3b-q3kxl": {
       "description": "Qwen3.6 35B-A3B MoE UD-Q3_K_XL - fits entirely in VRAM",

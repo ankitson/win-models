@@ -194,7 +194,8 @@ def start(args: argparse.Namespace) -> None:
                 "--log-timestamps",
                 "--log-prompts-dir", str(log_dir / "llama-prompts"),
             ]
-            user_extra = os.environ.get("UNSLOTH_LLAMA_EXTRA_ARGS", "")
+            # Per-model config takes priority; env var is the fallback.
+            user_extra = cfg.llama_extra_args if cfg and cfg.llama_extra_args else os.environ.get("UNSLOTH_LLAMA_EXTRA_ARGS", "")
             if user_extra:
                 llama_extra += user_extra.split()
             unsloth_cmd += ["--"] + llama_extra
@@ -218,17 +219,14 @@ def start(args: argparse.Namespace) -> None:
             echo("Error: CLOUDFLARE_API_TOKEN is not set — Caddy cannot solve"
                  " the DNS-01 challenge. Load .env.secret (or export it) and re-run.")
         else:
-            config = str(REPO_ROOT / "Caddyfile").replace(
-                "{env.CLOUDFLARE_API_TOKEN}",
-                os.environ["CLOUDFLARE_API_TOKEN"],
-            )
+            caddyfile = str(REPO_ROOT / "Caddyfile")
             # Validate the config so a typo doesn't start a Caddy that dies silently.
-            validation = _run_caddy_validate(caddy_bin, config)
+            validation = _run_caddy_validate(caddy_bin, caddyfile)
             if validation is not None:
                 echo(f"Error: Caddyfile failed validation:\n{validation}")
             else:
                 proc = ManagedProcess(
-                    args=[caddy_bin, "run", "--config", config],
+                    args=[caddy_bin, "run", "--config", caddyfile],
                     log_name="caddy",
                     log_dir=log_dir,
                     pid_file=log_dir / "caddy.pid",
