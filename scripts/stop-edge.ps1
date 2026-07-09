@@ -26,19 +26,20 @@ function Invoke-WinModels {
 function Stop-StaleWinModelsConsoleScripts {
     $escapedRepo = [regex]::Escape($RepoRoot)
     $processes = Get-CimInstance Win32_Process |
-        Where-Object {
-            $_.CommandLine -and
-            $_.CommandLine -match $escapedRepo -and
-            (
-                $_.CommandLine -match '\\.venv\\Scripts\\win-models\.exe' -or
-                $_.CommandLine -match '\\buv(?:\\.exe)?\\b.*\\brun\\s+win-models\\b'
-            )
-        }
+    Where-Object {
+        $_.CommandLine -and
+        $_.CommandLine -match $escapedRepo -and
+        (
+            $_.CommandLine -match '\\.venv\\Scripts\\win-models\.exe' -or
+            $_.CommandLine -match '\\buv(?:\\.exe)?\\b.*\\brun\\s+win-models\\b'
+        )
+    }
     foreach ($process in $processes) {
         try {
             Stop-Process -Id $process.ProcessId -Force
             Write-Output ("Stopped stale win-models console-script wrapper PID {0}." -f $process.ProcessId)
-        } catch {
+        }
+        catch {
             Write-Output ("Could not stop stale win-models wrapper PID {0}: {1}" -f $process.ProcessId, $_.Exception.Message)
         }
     }
@@ -50,10 +51,12 @@ function Stop-CaddyForEdge {
         try {
             & $caddy.Source stop 2>$null | Out-Null
             Write-Output "Stopped Caddy via caddy stop."
-        } catch {
+        }
+        catch {
             Write-Output "caddy stop did not complete cleanly; checking port 443."
         }
-    } else {
+    }
+    else {
         Write-Output "caddy command not found; checking port 443."
     }
 
@@ -83,9 +86,16 @@ Invoke-WinModels parakeet stop --port $AsrPort
 Invoke-WinModels comfy stop --port $ComfyPort
 Stop-StaleWinModelsConsoleScripts
 
+# $OpencodeEnabled = if ($env:WIN_MODELS_OPENCODE_ENABLED) { $env:WIN_MODELS_OPENCODE_ENABLED } else { "1" }
+# $OpencodePort = if ($env:WIN_MODELS_OPENCODE_PORT) { $env:WIN_MODELS_OPENCODE_PORT } else { "4096" }
+# if ($OpencodeEnabled -ne "0") {
+# & (Join-Path $PSScriptRoot "stop-opencode.ps1") -Port $OpencodePort
+# }
+
 if ($null -eq $priorPythonPath) {
     Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue
-} else {
+}
+else {
     $env:PYTHONPATH = $priorPythonPath
 }
 

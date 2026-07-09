@@ -86,8 +86,11 @@ def stop(args: argparse.Namespace) -> None:
                 stop_on_port(port)
 
         # 2. Kill by known process names (catches orphans not listening)
-        for name in ("llama-server", "caddy", "litert-lm"):
+        kill_caddy = args.caddy or getattr(args, "all", False)
+        for name in ("llama-server", "litert-lm"):
             stop_by_name(name)
+        if kill_caddy:
+            stop_by_name("caddy")
 
     except Exception:
         import traceback
@@ -138,8 +141,11 @@ def start(args: argparse.Namespace) -> None:
     os.environ.setdefault("WIN_MODELS_LLAMA_LOG_FILE", str(log_dir / "llama-io.jsonl"))
     os.environ.setdefault("UNSLOTH_LLAMA_LOG_DIR", str(log_dir / "llama-server"))
     os.environ.setdefault("UNSLOTH_LLAMA_PROMPTS_DIR", str(log_dir / "llama-prompts" / date.today().isoformat()))
+    # llama-server won't create this dir on its own — ensure it exists.
+    (log_dir / "llama-server").mkdir(parents=True, exist_ok=True)
+    (log_dir / "llama-prompts" / date.today().isoformat()).mkdir(parents=True, exist_ok=True)
 
-    # ── Stop anything already running ─────────────────────────────────
+    # ── Stop anything already running (except Caddy — it's our connection) ──
     stop(
         argparse.Namespace(
             port=args.studio_port,
@@ -147,7 +153,7 @@ def start(args: argparse.Namespace) -> None:
             lmstudio_port=args.lmstudio_port,
             asr_port=args.asr_port,
             comfy_port=args.comfy_port,
-            caddy=args.caddy,
+            caddy=False,
             all=False,
         )
     )

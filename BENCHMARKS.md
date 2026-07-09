@@ -3,7 +3,7 @@
 These are quick local smoke benchmarks from this Windows machine:
 
 - GPU: NVIDIA GeForce RTX 5080, 16 GB VRAM
-- Runtime for GGUF models: llama.cpp `b9536` CUDA build
+- Runtime for GGUF models: llama.cpp `b9878` CUDA build
 - llama.cpp settings: `ctx-size=8192`, `parallel=1`, `flash-attn=on`, `reasoning=on`
 - Benchmark prompt: one short reasoning-friendly sentence prompt
 - Benchmark command shape: `just plain bench <model>`, usually `runs=2`, `max_tokens=512`
@@ -38,7 +38,7 @@ These numbers are useful for rough local comparison, not a rigorous eval. With r
 - Google QAT 12B image test worked through the OpenAI-compatible API and answered `A red square.`
 - ggml-org 12B loaded its Q8_0 multimodal projector successfully.
 - Unsloth 26B-A4B loaded its F16 multimodal projector successfully, but left little VRAM headroom.
-- Docker's bundled llama.cpp build could not load the new Gemma 4 projector (`unknown projector type: gemma4uv`), so the repo uses llama.cpp `b9536`.
+- Docker's bundled llama.cpp build could not load the new Gemma 4 projector (`unknown projector type: gemma4uv`), so the repo uses llama.cpp `b9878`.
 
 ## Current Recommendation
 

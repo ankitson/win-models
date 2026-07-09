@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import comfyui, lmstudio, parakeet_asr, plain_llama, unsloth, utils
+from . import comfyui, edge, lmstudio, parakeet_asr, plain_llama, unsloth, utils
 
 
 AREAS = {
@@ -13,6 +13,7 @@ AREAS = {
     "parakeet": ("Parakeet ASR sidecar commands", parakeet_asr.main),
     "comfy": ("ComfyUI setup and serve commands", comfyui.main),
     "utils": ("Windows utility commands", utils.main),
+    "edge": ("Edge server start/stop (replaces start-edge.ps1)", edge.main),
 }
 
 

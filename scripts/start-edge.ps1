@@ -16,19 +16,35 @@ $ComfyHome = if ($env:COMFYUI_HOME) { $env:COMFYUI_HOME } else { "E:\root\projec
 $ComfyModelRoot = if ($env:COMFYUI_MODEL_ROOT) { $env:COMFYUI_MODEL_ROOT } else { Join-Path $ModelRoot "comfyui" }
 $ComfyPort = if ($env:COMFYUI_PORT) { $env:COMFYUI_PORT } else { "8188" }
 $ComfyMemory = if ($env:COMFYUI_MEMORY) { $env:COMFYUI_MEMORY } else { "auto" }
-$DefaultModel = if ($env:UNSLOTH_DEFAULT_MODEL) { $env:UNSLOTH_DEFAULT_MODEL } else { "unsloth/gemma-4-26B-A4B-it-qat-GGUF:UD-Q4_K_XL" }
-$ContextLength = if ($env:UNSLOTH_CONTEXT_LENGTH) { $env:UNSLOTH_CONTEXT_LENGTH } else { "131072" }
-$Parallel = if ($env:UNSLOTH_PARALLEL) { $env:UNSLOTH_PARALLEL } else { "1" }
-$CacheTypeKv = if ($env:UNSLOTH_CACHE_TYPE_KV) { $env:UNSLOTH_CACHE_TYPE_KV } else { "q8_0" }
-$ReasoningFormat = if ($env:UNSLOTH_REASONING_FORMAT) { $env:UNSLOTH_REASONING_FORMAT } else { "deepseek" }
+
+# ── Load model config from declarative models-config.json ─────────────────
+$ModelsConfigPath = Join-Path $RepoRoot "models-config.json"
+$ModelsConfig = $null
+$ModelConfigEntry = $null
+if (Test-Path $ModelsConfigPath) {
+    $ModelsConfig = Get-Content $ModelsConfigPath -Raw | ConvertFrom-Json
+}
+$DefaultModelKey = if ($env:WIN_MODELS_DEFAULT_MODEL_KEY) { $env:WIN_MODELS_DEFAULT_MODEL_KEY } elseif ($ModelsConfig -and $ModelsConfig.default_model) { $ModelsConfig.default_model } else { "qwen35b-a3b-q4kxl" }
+if ($ModelsConfig -and $ModelsConfig.models."$DefaultModelKey") {
+    $ModelConfigEntry = $ModelsConfig.models."$DefaultModelKey"
+}
+# UNSLOTH_DEFAULT_MODEL env var still takes top-level precedence
+$DefaultModel = if ($env:UNSLOTH_DEFAULT_MODEL) { $env:UNSLOTH_DEFAULT_MODEL } elseif ($ModelConfigEntry -and $ModelConfigEntry.hf_model_ref) { $ModelConfigEntry.hf_model_ref } else { "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_XL" }
+$ContextLength = if ($env:UNSLOTH_CONTEXT_LENGTH) { $env:UNSLOTH_CONTEXT_LENGTH } elseif ($ModelConfigEntry -and $ModelConfigEntry.context_length) { "$($ModelConfigEntry.context_length)" } else { "131072" }
+$Parallel = if ($env:UNSLOTH_PARALLEL) { $env:UNSLOTH_PARALLEL } elseif ($ModelConfigEntry -and $ModelConfigEntry.parallel) { "$($ModelConfigEntry.parallel)" } else { "1" }
+$CacheTypeKv = if ($env:UNSLOTH_CACHE_TYPE_KV) { $env:UNSLOTH_CACHE_TYPE_KV } elseif ($ModelConfigEntry -and $ModelConfigEntry.cache_type_kv) { $ModelConfigEntry.cache_type_kv } else { "q8_0" }
+$ReasoningFormat = if ($env:UNSLOTH_REASONING_FORMAT) { $env:UNSLOTH_REASONING_FORMAT } elseif ($ModelConfigEntry -and $ModelConfigEntry.reasoning_format) { $ModelConfigEntry.reasoning_format } else { "deepseek" }
 $SpeculativeType = if ($env:UNSLOTH_SPECULATIVE_TYPE) { $env:UNSLOTH_SPECULATIVE_TYPE } else { "off" }
 $LlamaExtraArgs = if ($env:UNSLOTH_LLAMA_EXTRA_ARGS) { $env:UNSLOTH_LLAMA_EXTRA_ARGS } else { "--no-mmap --batch-size 256 --ubatch-size 512" }
-$ChatTemplateFile = if ($env:UNSLOTH_CHAT_TEMPLATE_FILE) { $env:UNSLOTH_CHAT_TEMPLATE_FILE } else { Join-Path $RepoRoot "src\unsloth\chat-templates\gemma-4-31b-it-pr118.jinja" }
+# chat_template_file from config — only apply if explicitly set (null = use model's built-in template)
+$ChatTemplateFile = if ($env:UNSLOTH_CHAT_TEMPLATE_FILE) { $env:UNSLOTH_CHAT_TEMPLATE_FILE } elseif ($ModelConfigEntry -and $ModelConfigEntry.chat_template_file) { Join-Path $RepoRoot $ModelConfigEntry.chat_template_file } else { "" }
 $PromptLog = if ($env:UNSLOTH_PROMPT_LOG) { $env:UNSLOTH_PROMPT_LOG } else { "1" }
 $PromptLogFile = if ($env:UNSLOTH_PROMPT_LOG_FILE) { $env:UNSLOTH_PROMPT_LOG_FILE } else { Join-Path $LogDir "unsloth-prompts.jsonl" }
+$LlamaIOLog = if ($env:WIN_MODELS_LLAMA_LOG) { $env:WIN_MODELS_LLAMA_LOG } else { "1" }
+$LlamaIOLogFile = if ($env:WIN_MODELS_LLAMA_LOG_FILE) { $env:WIN_MODELS_LLAMA_LOG_FILE } else { Join-Path $LogDir "llama-io.jsonl" }
 $StudioPort = if ($env:WIN_MODELS_STUDIO_PORT) { $env:WIN_MODELS_STUDIO_PORT } else { "8888" }
 $LlamaPort = if ($env:UNSLOTH_LLAMA_PORT) { $env:UNSLOTH_LLAMA_PORT } elseif ($env:WIN_MODELS_LLAMA_PORT) { $env:WIN_MODELS_LLAMA_PORT } else { "8080" }
-$UnslothSourceRepo = if ($env:UNSLOTH_SOURCE_REPO) { $env:UNSLOTH_SOURCE_REPO } else { "" }
+$UnslothSourceRepo = if ($env:UNSLOTH_SOURCE_REPO) { $env:UNSLOTH_SOURCE_REPO } else { "C:\Users\ankit\Documents\docs-root\projects\code\unsloth" }
 $UnslothSourceBuildFrontend = if ($env:UNSLOTH_SOURCE_BUILD_FRONTEND) { $env:UNSLOTH_SOURCE_BUILD_FRONTEND } else { "0" }
 $LmstudioEnabled = if ($env:WIN_MODELS_LMSTUDIO_ENABLED) { $env:WIN_MODELS_LMSTUDIO_ENABLED } else { "0" }
 $LmstudioHost = if ($env:LMSTUDIO_HOST) { $env:LMSTUDIO_HOST } else { "127.0.0.1" }
@@ -60,12 +76,14 @@ if (-not (Test-Path $WinModelsPython)) {
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $env:UNSLOTH_PROMPT_LOG = $PromptLog
 $env:UNSLOTH_PROMPT_LOG_FILE = $PromptLogFile
-foreach ($path in @($CaddyOutLog, $CaddyErrLog, $CaddyAccessLog, $UnslothOutLog, $UnslothErrLog, $LmstudioOutLog, $LmstudioErrLog, $AsrOutLog, $AsrErrLog)) {
+$env:WIN_MODELS_LLAMA_LOG = $LlamaIOLog
+$env:WIN_MODELS_LLAMA_LOG_FILE = $LlamaIOLogFile
+foreach ($path in @($CaddyOutLog, $CaddyErrLog, $CaddyAccessLog, $UnslothOutLog, $UnslothErrLog, $LmstudioOutLog, $LmstudioErrLog, $AsrOutLog, $AsrErrLog, $LlamaIOLogFile)) {
     if (-not (Test-Path $path)) {
         New-Item -ItemType File -Path $path | Out-Null
     }
 }
-foreach ($path in @($CaddyOutLog, $CaddyErrLog, $UnslothOutLog, $UnslothErrLog, $LmstudioOutLog, $LmstudioErrLog, $AsrOutLog, $AsrErrLog)) {
+foreach ($path in @($CaddyOutLog, $CaddyErrLog, $UnslothOutLog, $UnslothErrLog, $LmstudioOutLog, $LmstudioErrLog, $AsrOutLog, $AsrErrLog, $LlamaIOLogFile)) {
     Clear-Content -Path $path -ErrorAction SilentlyContinue
 }
 
@@ -98,7 +116,8 @@ function Resolve-RequiredSecret {
     $value = $null
     try {
         $value = (& $Op.Source read $OpRef 2>$null)
-    } catch {
+    }
+    catch {
         $value = $null
     }
     $value = if ($null -eq $value) { "" } else { [string]($value -join "`n").Trim() }
@@ -115,7 +134,8 @@ Resolve-RequiredSecret -Name "CLOUDFLARE_API_TOKEN" -OpRef $CloudflareOpRef -Pur
 
 try {
     & $Caddy.Source stop 2>$null | Out-Null
-} catch {
+}
+catch {
 }
 
 if (Get-NetTCPConnection -State Listen -LocalPort 443 -ErrorAction SilentlyContinue) {
@@ -162,8 +182,30 @@ if ($LmstudioEnabled -ne "0") {
         $lmServeArgs += @("--model", $LmstudioDefaultModel)
     }
     $lmstudioProcess = Start-Process -FilePath $WinModelsPython -ArgumentList $lmServeArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $LmstudioOutLog -RedirectStandardError $LmstudioErrLog -PassThru
-} else {
+}
+else {
     Write-Output "LM Studio integration disabled by WIN_MODELS_LMSTUDIO_ENABLED=0."
+}
+
+# --- OpenCode headless server (opencode serve) ---
+# Guarded like the other integrations. The launcher (scripts/start-opencode.ps1)
+# reads OPENCODE_SERVER_PASSWORD from .env.secret, binds 127.0.0.1, and writes
+# its own logs; Caddy fronts it at opencode.win.ankitson.com (see the Caddyfile).
+$OpencodeEnabled = if ($env:WIN_MODELS_OPENCODE_ENABLED) { $env:WIN_MODELS_OPENCODE_ENABLED } else { "1" }
+$OpencodePort = if ($env:WIN_MODELS_OPENCODE_PORT) { $env:WIN_MODELS_OPENCODE_PORT } else { "4096" }
+$OpencodeOutLog = Join-Path $LogDir "opencode.out.log"
+$OpencodeErrLog = Join-Path $LogDir "opencode.err.log"
+$OpencodeProcess = $null
+if ($OpencodeEnabled -ne "0") {
+    $ocStartArgs = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        (Join-Path $RepoRoot "scripts\start-opencode.ps1"),
+        "-Port", $OpencodePort
+    )
+    $OpencodeProcess = Start-Process -FilePath "powershell.exe" -ArgumentList $ocStartArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -PassThru
+}
+else {
+    Write-Output "OpenCode integration disabled by WIN_MODELS_OPENCODE_ENABLED=0."
 }
 
 $asrProcess = $null
@@ -174,7 +216,8 @@ if ($AsrEnabled -ne "0") {
         $env:UNSLOTH_ASR_FALLBACK_URL = "http://$AsrHost`:$AsrPort"
         if ($existingAsr.Count -gt 0) {
             Write-Output ("Parakeet ASR already listening on {0}. Using it for Studio voice fallback." -f $env:UNSLOTH_ASR_FALLBACK_URL)
-        } else {
+        }
+        else {
             $priorPythonPath = $env:PYTHONPATH
             $env:PYTHONPATH = if ($priorPythonPath) { "$RepoRoot\src;$priorPythonPath" } else { "$RepoRoot\src" }
             $asrArgs = @(
@@ -188,18 +231,22 @@ if ($AsrEnabled -ne "0") {
             $asrProcess = Start-Process -FilePath $asrPython -ArgumentList $asrArgs -WorkingDirectory $RepoRoot -WindowStyle Hidden -RedirectStandardOutput $AsrOutLog -RedirectStandardError $AsrErrLog -PassThru
             if ($null -eq $priorPythonPath) {
                 Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue
-            } else {
+            }
+            else {
                 $env:PYTHONPATH = $priorPythonPath
             }
         }
-    } else {
+    }
+    else {
         Write-Output ("Parakeet ASR venv not found at {0}. Run `just parakeet setup` to enable voice transcription fallback." -f $asrPython)
         Remove-Item Env:\UNSLOTH_ASR_FALLBACK_URL -ErrorAction SilentlyContinue
     }
-} else {
+}
+else {
     Remove-Item Env:\UNSLOTH_ASR_FALLBACK_URL -ErrorAction SilentlyContinue
 }
 
+$unslothProcess = $null
 $unslothArgs = @(
     "-m", "win_models.cli",
     "unsloth", "serve",
@@ -232,7 +279,8 @@ $caddyProcess = Start-Process -FilePath $Caddy.Source -ArgumentList @("run", "--
 
 if ($null -eq $priorPythonPath) {
     Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue
-} else {
+}
+else {
     $env:PYTHONPATH = $priorPythonPath
 }
 
@@ -243,6 +291,13 @@ if ($asrProcess) {
 if ($lmstudioProcess) {
     Write-Output ("Started/confirmed LM Studio background helper PID {0}. API: http://{1}:{2}/v1. Logs: {3}, {4}" -f $lmstudioProcess.Id, $LmstudioHost, $LmstudioPort, $LmstudioOutLog, $LmstudioErrLog)
 }
-Write-Output ("Started Unsloth background PID {0}. Logs: {1}, {2}" -f $unslothProcess.Id, $UnslothOutLog, $UnslothErrLog)
-Write-Output ("Embedded llama-server target: http://127.0.0.1:{0}/v1 via https://llama.win.ankitson.com/v1 after the model loads." -f $LlamaPort)
+if ($unslothProcess) {
+    Write-Output ("Started Unsloth background PID {0}. Logs: {1}, {2}" -f $unslothProcess.Id, $UnslothOutLog, $UnslothErrLog)
+    Write-Output ("Embedded llama-server target: http://127.0.0.1:{0}/v1 via https://llama.win.ankitson.com/v1 after the model loads." -f $LlamaPort)
+}
+
+if ($opencodeProcess) {
+    Write-Output ("Started OpenCode background PID {0}. API: http://127.0.0.1:{1} (basic auth) -> https://opencode.win.ankitson.com after it loads. Logs: {2}, {3}" -f $opencodeProcess.Id, $OpencodePort, $OpencodeOutLog, $OpencodeErrLog)
+}
+
 Write-Output ("Started Caddy background PID {0}. Logs: {1}, {2}, access {3}" -f $caddyProcess.Id, $CaddyOutLog, $CaddyErrLog, $CaddyAccessLog)

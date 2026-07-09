@@ -7,15 +7,16 @@ import time
 from pathlib import Path
 
 from .common import download_file, echo, ensure_dir, post_json, print_table, run, stop_process_names
-from .config import DEFAULT_HOST, DEFAULT_LITERT_PORT, DEFAULT_LLAMA_PORT, DEFAULT_MODEL_ROOT
+from .config import DEFAULT_HOST, DEFAULT_LITERT_PORT, DEFAULT_LLAMA_PORT, DEFAULT_MODEL_ROOT, get_default_model_key, get_model_config, list_model_keys
 from .models import LITERT_VARIANTS, LLAMA_VARIANTS, MODEL_GROUPS, VARIANTS, Variant
+from .raw_logger import log_level, log_path, tee_subprocess
 
 
 def llama_run_dir(model_root: Path) -> Path:
-    run_dir = model_root / "llama-b9536-cuda12" / "run"
+    run_dir = model_root / "llama-b9878-cuda13.3" / "run"
     exe = run_dir / "llama-server.exe"
     if not exe.exists():
-        raise FileNotFoundError(f"Missing llama.cpp server at {exe}. Download/extract llama.cpp b9536 CUDA first.")
+        raise FileNotFoundError(f"Missing llama.cpp server at {exe}. Download/extract llama.cpp b9878 CUDA first.")
     return run_dir
 
 
@@ -150,11 +151,30 @@ def download_cache(args: argparse.Namespace) -> None:
     echo("\nDone.")
 
 
+def _resolve_log_file(args: argparse.Namespace) -> Path | None:
+    if args.log:
+        return Path(args.log_file) if args.log_file else log_path()
+    env_level = log_level()
+    if env_level:
+        return log_path()
+    return None
+
+
 def serve(args: argparse.Namespace) -> None:
     model_root = Path(args.model_root)
     variant = VARIANTS[args.variant]
     if variant.runtime != "llama":
         raise ValueError(f"{variant.key} is a {variant.runtime} variant, not a llama.cpp variant")
+
+    # Load declarative runtime config for this model variant
+    cfg = get_model_config(variant.key)
+    ctx_size = args.context_size or (cfg.context_length if cfg else 8192)
+    cache_type = args.cache_type_kv or (cfg.cache_type_kv if cfg else "q8_0")
+    reasoning = args.reasoning or (cfg.reasoning if cfg else "on")
+    reasoning_fmt = args.reasoning_format or (cfg.reasoning_format if cfg else "deepseek")
+    gpu_layers = args.gpu_layers or (cfg.gpu_layers if cfg else "all")
+    flash_attn = args.flash_attn if args.flash_attn is not None else (cfg.flash_attn if cfg else True)
+    alias = args.alias or variant.alias
 
     model = _resolve_variant_file(variant, model_root, variant.model_file)
     mmproj = (
@@ -179,34 +199,45 @@ def serve(args: argparse.Namespace) -> None:
         "--port",
         str(args.port),
         "--alias",
-        variant.alias,
+        alias,
         "--ctx-size",
-        str(args.context_size),
+        str(ctx_size),
         "--parallel",
         "1",
         "--n-gpu-layers",
-        str(args.gpu_layers),
+        str(gpu_layers),
         "--flash-attn",
-        "on",
+        "on" if flash_attn else "off",
         "--cache-type-k",
-        "q8_0",
+        cache_type,
         "--cache-type-v",
-        "q8_0",
+        cache_type,
         "--media-path",
         media,
         "--cache-ram",
         str(args.cache_ram),
         "--jinja",
         "--reasoning",
-        args.reasoning,
+        reasoning,
         "--reasoning-format",
-        "deepseek",
+        reasoning_fmt,
         "--sleep-idle-seconds",
         "120",
     ]
+
+    log_file = _resolve_log_file(args)
+    if log_file:
+        command.insert(1, "--verbose")
+
     echo(f"Starting {variant.key} as {variant.alias} on http://{args.host}:{args.port}/v1")
+    if log_file:
+        echo(f"Raw I/O log: {log_file}")
     echo("Server output will stream in this terminal. Press Ctrl+C to stop.")
-    run(command, cwd=run_dir)
+
+    if log_file:
+        tee_subprocess(command, log_file, cwd=run_dir)
+    else:
+        run(command, cwd=run_dir)
 
 
 def serve_litert(args: argparse.Namespace) -> None:
@@ -303,10 +334,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model-root", default=str(DEFAULT_MODEL_ROOT))
     p.add_argument("--host", default=DEFAULT_HOST)
     p.add_argument("--port", type=int, default=DEFAULT_LLAMA_PORT)
-    p.add_argument("--reasoning", choices=("on", "off", "auto"), default="on")
-    p.add_argument("--context-size", type=int, default=8192)
-    p.add_argument("--gpu-layers", default="all")
+    p.add_argument("--reasoning", choices=("on", "off", "auto"), default=None, help="Overrides models-config.json")
+    p.add_argument("--context-size", type=int, default=None, help="Overrides models-config.json")
+    p.add_argument("--cache-type-kv", default=None, help="Overrides models-config.json (e.g. q8_0, f16)")
+    p.add_argument("--reasoning-format", default=None, help="Overrides models-config.json (e.g. deepseek)")
+    p.add_argument("--flash-attn", action=argparse.BooleanOptionalAction, default=None, help="Overrides models-config.json")
+    p.add_argument("--alias", default=None, help="Overrides variant alias from models-config.json")
+    p.add_argument("--gpu-layers", default=None, help="Overrides models-config.json (e.g. all, 20)")
     p.add_argument("--cache-ram", type=int, default=8192)
+    p.add_argument("--log", action="store_true", help="Enable raw I/O logging of llama-server output")
+    p.add_argument("--log-file", help="Path to log file (default: logs/llama-server.log)")
     p.set_defaults(func=serve)
 
     p = sub.add_parser("serve-litert")
@@ -322,7 +359,40 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--runs", type=int, default=3)
     p.add_argument("--max-tokens", type=int, default=256)
     p.set_defaults(func=bench)
+
+    p = sub.add_parser("list-models", help="List available models from models-config.json")
+    p.set_defaults(func=list_models)
     return parser
+
+
+def list_models(args: argparse.Namespace) -> None:
+    """List available models and their runtime config from models-config.json."""
+    keys = list_model_keys()
+    default_key = get_default_model_key()
+    if not keys:
+        echo("No models found in models-config.json")
+        return
+    rows: list[dict] = []
+    for key in keys:
+        cfg = get_model_config(key)
+        if cfg is None:
+            continue
+        is_default = "*" if key == default_key else ""
+        rows.append({
+            "key": key,
+            "default": is_default,
+            "description": cfg.description,
+            "context": cfg.context_length,
+            "cache_kv": cfg.cache_type_kv,
+            "reasoning": cfg.reasoning,
+            "template": cfg.chat_template_file or "(built-in)",
+        })
+    print_table(
+        rows,
+        ["default", "key", "description", "context", "cache_kv", "reasoning", "template"],
+    )
+    echo(f"\nDefault: {default_key}")
+    echo("Set WIN_MODELS_DEFAULT_MODEL_KEY env var to change, or edit models-config.json.")
 
 
 def main(argv: list[str] | None = None) -> None:

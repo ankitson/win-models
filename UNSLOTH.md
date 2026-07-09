@@ -160,21 +160,21 @@ venv's `install_llama_prebuilt.py` with a local-zip shim:
 1. Before a release download, reuse an already-downloaded asset of the same name
    from `UNSLOTH_LLAMA_LOCAL_DIR` or `~\Downloads`.
 2. Keep the official sha256 and post-install smoke test.
-3. Install the pinned `b9536`, cuda-`13.3` build from those zips.
+3. Install the pinned `b9878`, cuda-`13.3` build from those zips.
 
 Expected files in `~\Downloads`, unless `just unsloth setup <zip-dir>` points
 elsewhere:
 
 ```text
-llama-b9536-bin-win-cuda-13.3-x64.zip
+llama-b9878-bin-win-cuda-13.3-x64.zip
 cudart-llama-bin-win-cuda-13.3-x64.zip
 ```
 
 Sources:
 
 ```text
-https://github.com/ggml-org/llama.cpp/releases/download/b9536/llama-b9536-bin-win-cuda-13.3-x64.zip
-https://github.com/ggml-org/llama.cpp/releases/download/b9536/cudart-llama-bin-win-cuda-13.3-x64.zip
+https://github.com/ggml-org/llama.cpp/releases/download/b9878/llama-b9878-bin-win-cuda-13.3-x64.zip
+https://github.com/ggml-org/llama.cpp/releases/download/b9878/cudart-llama-bin-win-cuda-13.3-x64.zip
 ```
 
 This machine is an RTX 5080. The cuda-12.4 prebuilt predates Blackwell SASS, so

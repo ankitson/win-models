@@ -20,7 +20,9 @@
 	import common_site
 	@unsloth host unsloth.win.ankitson.com
 	handle @unsloth {
-		reverse_proxy 127.0.0.1:8888
+		reverse_proxy 127.0.0.1:8888 {
+			flush_interval -1
+		}
 	}
 
 	@comfy host comfy.win.ankitson.com
@@ -41,6 +43,13 @@
 	@litert host litert.win.ankitson.com
 	handle @litert {
 		reverse_proxy 127.0.0.1:9379
+	}
+
+	@opencode host opencode.win.ankitson.com
+	handle @opencode {
+		reverse_proxy 127.0.0.1:4096 {
+			flush_interval -1
+		}
 	}
 
 	@root {

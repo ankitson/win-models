@@ -223,6 +223,69 @@ VARIANTS: dict[str, Variant] = {
             ),
         ),
     ),
+    "qwen35b-a3b-q4kxl": Variant(
+        key="qwen35b-a3b-q4kxl",
+        directory="unsloth-qwen3.6-35b-a3b-ud-q4kxl",
+        alias="qwen3.6-35b-a3b-q4kxl",
+        model_file="Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+        mmproj_file="mmproj-F16.gguf",
+        assets=(
+            Asset(
+                "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf?download=true",
+                "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+                hf_repo_id="unsloth/Qwen3.6-35B-A3B-GGUF",
+                hf_filename="Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+            ),
+            Asset(
+                "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/mmproj-F16.gguf?download=true",
+                "mmproj-F16.gguf",
+                hf_repo_id="unsloth/Qwen3.6-35B-A3B-GGUF",
+                hf_filename="mmproj-F16.gguf",
+            ),
+        ),
+    ),
+    "qwen35b-a3b-q3kxl": Variant(
+        key="qwen35b-a3b-q3kxl",
+        directory="unsloth-qwen3.6-35b-a3b-ud-q3kxl",
+        alias="qwen3.6-35b-a3b-q3kxl",
+        model_file="Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf",
+        mmproj_file="mmproj-F16.gguf",
+        assets=(
+            Asset(
+                "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf?download=true",
+                "Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf",
+                hf_repo_id="unsloth/Qwen3.6-35B-A3B-GGUF",
+                hf_filename="Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf",
+            ),
+            Asset(
+                "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/mmproj-F16.gguf?download=true",
+                "mmproj-F16.gguf",
+                hf_repo_id="unsloth/Qwen3.6-35B-A3B-GGUF",
+                hf_filename="mmproj-F16.gguf",
+            ),
+        ),
+    ),
+    "qwen27b-q4km": Variant(
+        key="qwen27b-q4km",
+        directory="unsloth-qwen3.6-27b-q4km",
+        alias="qwen3.6-27b-q4km",
+        model_file="Qwen3.6-27B-Q4_K_M.gguf",
+        mmproj_file="mmproj-F16.gguf",
+        assets=(
+            Asset(
+                "https://huggingface.co/unsloth/Qwen3.6-27B-GGUF/resolve/main/Qwen3.6-27B-Q4_K_M.gguf?download=true",
+                "Qwen3.6-27B-Q4_K_M.gguf",
+                hf_repo_id="unsloth/Qwen3.6-27B-GGUF",
+                hf_filename="Qwen3.6-27B-Q4_K_M.gguf",
+            ),
+            Asset(
+                "https://huggingface.co/unsloth/Qwen3.6-27B-GGUF/resolve/main/mmproj-F16.gguf?download=true",
+                "mmproj-F16.gguf",
+                hf_repo_id="unsloth/Qwen3.6-27B-GGUF",
+                hf_filename="mmproj-F16.gguf",
+            ),
+        ),
+    ),
 }
 
 
