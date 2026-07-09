@@ -23,6 +23,7 @@ CLI_API_KEY_REUSE_SHIM_MARKER = "UNSLOTH_CLI_API_KEY_REUSE_SHIM"
 OPENAI_REASONING_PASSTHROUGH_SHIM_MARKER = "UNSLOTH_OPENAI_REASONING_PASSTHROUGH_SHIM"
 EMBEDDING_EXTRA_ARGS_SHIM_MARKER = "UNSLOTH_EMBEDDING_EXTRA_ARGS_SHIM"
 FIXED_LLAMA_PORT_SHIM_MARKER = "UNSLOTH_FIXED_LLAMA_PORT_SHIM"
+LLAMA_LOG_DIR_SHIM_MARKER = "UNSLOTH_LLAMA_LOG_DIR_SHIM"
 OPENAI_REQUEST_AUTOLOAD_SHIM_MARKER = "UNSLOTH_OPENAI_REQUEST_AUTOLOAD_SHIM"
 OPENAI_AUTOLOAD_SPECULATIVE_SHIM_MARKER = "UNSLOTH_OPENAI_AUTOLOAD_SPECULATIVE_SHIM"
 OPENAI_PROMPT_LOGGING_SHIM_MARKER = "UNSLOTH_OPENAI_PROMPT_LOGGING_SHIM"
@@ -734,6 +735,67 @@ def apply_fixed_llama_port_shim(studio_home: Path) -> None:
         )
     target.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
     echo("  applied fixed llama-server port shim to backend.core.inference.llama_cpp")
+
+
+def apply_llama_log_dir_shim(studio_home: Path) -> None:
+    """Redirect llama-server stdout/stderr logs to a configurable dir.
+
+    By default Unsloth Studio writes to ``{UNSLOTH_STUDIO_HOME}/logs/``.
+    Set ``UNSLOTH_LLAMA_LOG_DIR`` to use a different directory —
+    usually ``{repo}/logs/llama-server``.
+    """
+    target = studio_package_dir(studio_home) / "backend" / "core" / "inference" / "llama_cpp.py"
+    if not target.exists():
+        raise FileNotFoundError(f"Missing {target}")
+    text = target.read_text(encoding="utf-8").replace("\r\n", "\n")
+    if LLAMA_LOG_DIR_SHIM_MARKER in text:
+        echo("  llama log-dir shim already present")
+        return
+
+    _log_line = '_log_dir_override = os.environ.get("UNSLOTH_LLAMA_LOG_DIR", "").strip()'
+
+    # Occurrence 1 — initial start (post-mortem comment anchor, 12-space indent body)
+    old1 = '''        # Tee llama-server output to a dedicated log file so a post-mortem
+        # in CI (or after a remote-debug session) has the full subprocess
+        # trail even when the parent only stored the last 50 lines.
+        self._llama_log_fh = None
+        try:
+            log_dir = _swa_cache_path().parent / "logs" / "llama-server"'''
+    if old1 not in text:
+        raise RuntimeError(
+            f"Could not find llama-log-dir anchor #1 (post-mortem) in {target}; the Studio backend changed."
+        )
+    new1 = f'''        # {LLAMA_LOG_DIR_SHIM_MARKER}: log dir overridable via env var.
+        # Tee llama-server output to a dedicated log file so a post-mortem
+        # in CI (or after a remote-debug session) has the full subprocess
+        # trail even when the parent only stored the last 50 lines.
+        self._llama_log_fh = None
+        try:
+            {_log_line}
+            log_dir = Path(_log_dir_override) if _log_dir_override else _swa_cache_path().parent / "logs" / "llama-server"'''
+    text = text.replace(old1, new1, 1)
+
+    # Occurrence 2 — retry/respawn (crash-log-retry comment anchor, 28-space indent body)
+    old2 = '''                        # from truncating the crash log a retry warning just
+                        # pointed the user at.
+                        self._llama_log_fh = None
+                        try:
+                            log_dir = _swa_cache_path().parent / "logs" / "llama-server"'''
+    if old2 not in text:
+        raise RuntimeError(
+            f"Could not find llama-log-dir anchor #2 (crash-retry) in {target}; the Studio backend changed."
+        )
+    new2 = f'''                        # {LLAMA_LOG_DIR_SHIM_MARKER}: retry path, same override.
+                        # from truncating the crash log a retry warning just
+                        # pointed the user at.
+                        self._llama_log_fh = None
+                        try:
+                            {_log_line}
+                            log_dir = Path(_log_dir_override) if _log_dir_override else _swa_cache_path().parent / "logs" / "llama-server"'''
+    text = text.replace(old2, new2, 1)
+
+    target.write_text(text, encoding="utf-8", newline="\n")
+    echo("  applied llama log-dir shim to backend.core.inference.llama_cpp")
 
 
 def apply_llama_local_zip_shim(studio_home: Path) -> None:
@@ -1888,6 +1950,115 @@ def _chat_prompt_log_body(
     if tools is not None:
         body["tools"] = tools
     return body
+
+
+# --- llama I/O raw logging (WIN_MODELS_LLAMA_LOG) ---
+
+def _llama_io_log_enabled() -> bool:
+    raw = (os.environ.get("WIN_MODELS_LLAMA_LOG") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on", "api", "all")
+
+
+def _llama_io_log_file() -> Optional[Path]:
+    if not _llama_io_log_enabled():
+        return None
+    raw = (os.environ.get("WIN_MODELS_LLAMA_LOG_FILE") or "").strip()
+    if raw:
+        return Path(raw)
+    return Path("logs") / "llama-io.jsonl"
+
+
+_LLAMA_IO_LOG_PATH: Optional[Path] = None
+_LLAMA_IO_LOG_FH = None  # file handle, set by _llama_io_init
+
+
+def _llama_io_init() -> None:
+    global _LLAMA_IO_LOG_PATH, _LLAMA_IO_LOG_FH
+    if _LLAMA_IO_LOG_PATH is not None:
+        return
+    path = _llama_io_log_file()
+    if path is None:
+        _LLAMA_IO_LOG_PATH = False
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _LLAMA_IO_LOG_PATH = path
+        _LLAMA_IO_LOG_FH = path.open("a", encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Cannot open llama I/O log %s: %s", path, exc)
+        _LLAMA_IO_LOG_PATH = False
+
+
+def _llama_io_write(record: dict) -> None:
+    if _LLAMA_IO_LOG_FH is None:
+        return
+    try:
+        _LLAMA_IO_LOG_FH.write(json.dumps(record, ensure_ascii=False, default=str) + "\\n")
+        _LLAMA_IO_LOG_FH.flush()
+    except Exception as exc:
+        logger.warning("Cannot write to llama I/O log: %s", exc)
+
+
+def _llama_is_local_llama_url(url: str) -> bool:
+    lower = url.lower()
+    if "127.0.0.1" in lower or "localhost" in lower or "::1" in lower:
+        return True
+    port = os.environ.get("UNSLOTH_LLAMA_PORT") or os.environ.get("WIN_MODELS_LLAMA_PORT") or ""
+    if port and f":{{port}}" in lower:
+        return True
+    return False
+
+
+_LLAMA_ORIGINALS_PATCHED = False
+
+
+def _patch_httpx_for_llama_io_log() -> None:
+    global _LLAMA_ORIGINALS_PATCHED
+    if _LLAMA_ORIGINALS_PATCHED:
+        return
+    _llama_io_init()
+    if _LLAMA_IO_LOG_PATH is False:
+        return
+    _LLAMA_ORIGINALS_PATCHED = True
+
+    _orig_send = httpx.AsyncClient.send
+
+    async def _logged_send(self, request, **kwargs):
+        response = await _orig_send(self, request, **kwargs)
+        if _llama_io_log_enabled() and _llama_is_local_llama_url(str(request.url)):
+            try:
+                req_body = request.content.decode("utf-8", errors="replace") if request.content else ""
+                timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                _llama_io_write({{
+                    "timestamp": timestamp,
+                    "direction": "request",
+                    "url": str(request.url),
+                    "method": request.method,
+                    "body": req_body,
+                }})
+                resp_record = {{
+                    "timestamp": timestamp,
+                    "direction": "response",
+                    "url": str(request.url),
+                    "status": response.status_code,
+                }}
+                is_streaming = kwargs.get("stream") or request.headers.get("accept") == "text/event-stream"
+                if not is_streaming:
+                    try:
+                        resp_record["body"] = response.text
+                    except Exception:
+                        resp_record["body"] = "(streaming, not captured)"
+                else:
+                    resp_record["body"] = "(streaming)"
+                _llama_io_write(resp_record)
+            except Exception as exc:
+                logger.debug("llama I/O log error: %s", exc)
+        return response
+
+    httpx.AsyncClient.send = _logged_send
+
+
+_patch_httpx_for_llama_io_log()
 '''
     text = _replace_once(
         text,
@@ -5443,6 +5614,7 @@ def apply_studio_patch_stack(studio_home: Path, *, build_frontend: bool = False)
     apply_web_ui_tool_policy_shim(studio_home)
     apply_embedding_extra_args_shim(studio_home)
     apply_fixed_llama_port_shim(studio_home)
+    apply_llama_log_dir_shim(studio_home)
     apply_native_audio_mic_shim(studio_home, build_frontend=False)
     apply_assistant_prefix_continuation_shim(studio_home)
     if build_frontend:

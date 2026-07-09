@@ -16,8 +16,10 @@ class CommandError(RuntimeError):
     pass
 
 
-def echo(message: str = "") -> None:
-    print(message, flush=True)
+def echo(message: str = "", *, file= None) -> None:
+    if file is None:
+        file = sys.stdout
+    print(message, file=file, flush=True)
 
 
 def ensure_dir(path: Path) -> None:
